@@ -1,4 +1,4 @@
-"""The import-plan protocol: Claude (or a human) writes plan.json, Sciweave
+"""The import-plan protocol: Claude (or a human) writes plan.json, SciWeave
 checks it loudly, then applies it atomically.
 
     sciweave plan template > plan.json     # skeleton
@@ -34,7 +34,7 @@ import json
 import shutil
 from pathlib import Path
 
-from sciweave.project import MAX_SNAPSHOT_BYTES, Project, SciweaveError
+from sciweave.project import MAX_SNAPSHOT_BYTES, Project, SciWeaveError
 from sciweave.schema import EDGE_RELATIONS, MODES, NODE_TYPES, is_scalar_param, now_iso, slugify
 
 # "alpha" deliberately absent: in statistics it is the significance level, not plot opacity
@@ -88,9 +88,9 @@ def load_plan(path: str | Path) -> dict:
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise SciweaveError(f"plan file not found: {path}")
+        raise SciWeaveError(f"plan file not found: {path}")
     except json.JSONDecodeError as exc:
-        raise SciweaveError(f"plan is not valid JSON: {exc}")
+        raise SciWeaveError(f"plan is not valid JSON: {exc}")
 
 
 def check(p: Project, plan: dict) -> Report:
@@ -276,7 +276,7 @@ def apply(p: Project, plan: dict, actor: str = "claude") -> dict[str, str]:
     """Apply a checked plan. Returns {plan key -> new node id}."""
     rep = check(p, plan)
     if not rep.passed:
-        raise SciweaveError("plan has errors, not applied:\n" + rep.render())
+        raise SciWeaveError("plan has errors, not applied:\n" + rep.render())
     backup = json.loads(json.dumps(p.graph))
     hist_size = p.history_file.stat().st_size if p.history_file.exists() else 0
     created_files: list[Path] = []

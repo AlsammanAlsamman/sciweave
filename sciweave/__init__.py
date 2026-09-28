@@ -1,4 +1,4 @@
-"""Sciweave — a provenance network for research projects.
+"""SciWeave — a provenance network for research projects.
 
 Raw data, pipelines, parameters, scripts, tables, figures and the article,
 woven into one versioned graph (see DESIGN.md).

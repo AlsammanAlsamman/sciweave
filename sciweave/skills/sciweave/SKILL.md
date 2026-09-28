@@ -1,11 +1,11 @@
 ---
 name: sciweave
-description: Record research results into a Sciweave provenance project — raw data, inputs, pipelines, scripts, parameters, tables, figures, supplements and article sections, linked as a versioned network. Use when the user says "add this / these results to the (sciweave) project", "save this figure/table to the project", "record the parameters", "link this to the article", "what is stale", "how was Figure N made", or mentions Sciweave; also when starting a Sciweave project or an article template.
+description: Record research results into a SciWeave provenance project — raw data, inputs, pipelines, scripts, parameters, tables, figures, supplements and article sections, linked as a versioned network. Use when the user says "add this / these results to the (sciweave) project", "save this figure/table to the project", "record the parameters", "link this to the article", "what is stale", "how was Figure N made", or mentions SciWeave; also when starting a SciWeave project or an article template.
 ---
 
-# Sciweave — recording results into a provenance network
+# SciWeave — recording results into a provenance network
 
-Sciweave keeps a research project as a network: **nodes** (raw data, inputs,
+SciWeave keeps a research project as a network: **nodes** (raw data, inputs,
 pipelines, steps, scripts, results, tables, figures, supplements, sections,
 articles, notes) and **links** that say what was made from what, carrying the
 **result-changing parameters**, the script (and its version) and the command.
@@ -87,7 +87,7 @@ When the user asks to add results from the current work to the project:
 - Never apply a plan the user hasn't seen. Never `--force` a restore without asking.
 - Never copy raw data or huge files into the project (`plan check` warns; heed it).
 - Labels are short and specific: `Credible sets (finemapping)`, not
-  `final_table_v3_new`. The id (T3) is assigned by Sciweave.
+  `final_table_v3_new`. The id (T3) is assigned by SciWeave.
 - If a result's provenance is unknown, say so and link what *is* known;
   don't invent parameters.
 - Keep parameters on the edge that actually used them (produces/derives), not

@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from sciweave.project import Project, SciweaveError, fingerprint
+from sciweave.project import Project, SciWeaveError, fingerprint
 from sciweave.schema import slugify
 
 ARTICLE_SUBFOLDERS = ["figures", "tables", "supplementary", "scripts", "data", "notes", "latex/sections"]
@@ -35,7 +35,7 @@ MAIN_TEX = r"""\documentclass[11pt]{article}
 
 README = """# %(title)s
 
-Article folder managed by Sciweave (node `%(id)s`).
+Article folder managed by SciWeave (node `%(id)s`).
 
 | folder | what goes here |
 |---|---|
@@ -47,7 +47,7 @@ Article folder managed by Sciweave (node `%(id)s`).
 | `latex/` | `main.tex`, one file per section in `sections/`, `references.bib` |
 | `notes/` | reviewer comments, TODOs |
 
-Every placed file is linked in the Sciweave network to the result it came from,
+Every placed file is linked in the SciWeave network to the result it came from,
 so `sciweave trace <id>` always shows how it was generated.
 """
 
@@ -57,7 +57,7 @@ def new_article(p: Project, title: str, node_id: str | None = None,
     slug = slugify(title)
     folder = p.root / "articles" / slug
     if folder.exists() and any(folder.iterdir()):
-        raise SciweaveError(f"articles/{slug} already exists")
+        raise SciWeaveError(f"articles/{slug} already exists")
     for sub in ARTICLE_SUBFOLDERS:
         (folder / sub).mkdir(parents=True, exist_ok=True)
     inputs = "\n".join(f"\\input{{sections/{s}}}" for s in sections)
@@ -89,7 +89,7 @@ def _version_content(p: Project, node: dict, version: int) -> Path:
     cur = p.resolve(node["path"])
     if cur and cur.exists() and fingerprint(cur)["hash"] == v["hash"]:
         return cur
-    raise SciweaveError(f"content of {node['id']} v{version} is not available (not stored)")
+    raise SciWeaveError(f"content of {node['id']} v{version} is not available (not stored)")
 
 
 def place(p: Project, item_id: str, article_id: str, as_label: str, version: int | None = None,
@@ -97,9 +97,9 @@ def place(p: Project, item_id: str, article_id: str, as_label: str, version: int
     """Copy item's final (else current) version into the article folder and link it part_of."""
     item, art = p.node(item_id), p.node(article_id)
     if art["type"] != "article":
-        raise SciweaveError(f"{article_id} is not an article")
+        raise SciWeaveError(f"{article_id} is not an article")
     if not item["versions"]:
-        raise SciweaveError(f"{item_id} has no saved version to place")
+        raise SciWeaveError(f"{item_id} has no saved version to place")
     ver = version or item["final_version"] or item["current_version"]
     src = _version_content(p, item, ver)
     ext = Path(item["path"]).suffix

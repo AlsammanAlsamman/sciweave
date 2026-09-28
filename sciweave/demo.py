@@ -14,7 +14,7 @@ from pathlib import Path
 
 import sciweave.project as project_mod
 from sciweave import article as article_mod
-from sciweave.project import Project, SciweaveError
+from sciweave.project import Project, SciWeaveError
 
 
 class _Clock:
@@ -82,7 +82,7 @@ def _tsv(path: Path, header, rows):
 def build_demo(root: Path) -> Project:
     root = Path(root).resolve()
     if root.exists() and any(root.iterdir()):
-        raise SciweaveError(f"{root} is not empty; pick a new folder for the demo")
+        raise SciWeaveError(f"{root} is not empty; pick a new folder for the demo")
     clock = _Clock(datetime.now(timezone.utc) - timedelta(days=52))
     real_now = project_mod.now_iso
     project_mod.now_iso = clock

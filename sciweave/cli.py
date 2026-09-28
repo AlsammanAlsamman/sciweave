@@ -11,7 +11,7 @@ from pathlib import Path
 from sciweave import __version__
 from sciweave import article as article_mod
 from sciweave import plan as plan_mod
-from sciweave.project import Project, SciweaveError
+from sciweave.project import Project, SciWeaveError
 from sciweave.schema import EDGE_RELATIONS, NODE_TYPES
 from sciweave.trace import describe, edge_line, trace_down, trace_up
 
@@ -27,7 +27,7 @@ def parse_params(items) -> dict:
     out = {}
     for item in items or []:
         if "=" not in item:
-            raise SciweaveError(f"parameter must be key=value, got '{item}'")
+            raise SciWeaveError(f"parameter must be key=value, got '{item}'")
         k, v = item.split("=", 1)
         out[k.strip()] = parse_value(v.strip())
     return out
@@ -41,7 +41,7 @@ def get_project(args) -> Project:
 
 def cmd_init(args):
     p = Project.init(Path(args.path), name=args.name, description=args.description or "", bare=args.bare)
-    print(f"initialised Sciweave project '{p.graph['project']['name']}' at {p.root}")
+    print(f"initialised SciWeave project '{p.graph['project']['name']}' at {p.root}")
     print("  next: sciweave add <type> <label> <path>   ·   sciweave article new \"Title\"   ·   sciweave serve")
 
 
@@ -209,7 +209,7 @@ def cmd_article(args):
         print(f"created article {a['id']} · {a['label']} in {a['meta']['folder']}/")
     elif args.action == "place":
         if not args.as_label:
-            raise SciweaveError('article place needs --as "Figure 2"')
+            raise SciWeaveError('article place needs --as "Figure 2"')
         e = article_mod.place(p, args.item, args.article, args.as_label, version=args.version, actor=args.actor)
         p.commit()
         print(f"placed {args.item} v{e['placed_version']} as '{args.as_label}' -> {e['placed_path']}")
@@ -232,7 +232,7 @@ def cmd_plan(args):
         print(json.dumps(plan_mod.TEMPLATE, indent=2))
         return
     if not args.file:
-        raise SciweaveError("plan check/apply needs a plan file")
+        raise SciWeaveError("plan check/apply needs a plan file")
     p = get_project(args)
     plan = plan_mod.load_plan(args.file)
     if args.action == "check":
@@ -292,7 +292,7 @@ def cmd_install_skill(args):
     for f in src.iterdir():
         if f.is_file():
             shutil.copy2(f, dest / f.name)
-    print(f"installed the Sciweave skill to {dest}")
+    print(f"installed the SciWeave skill to {dest}")
     print("  in Claude Code: \"add these results to my sciweave project\" or /sciweave")
 
 
@@ -310,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
         s.set_defaults(fn=fn)
         return s
 
-    s = cmd("init", cmd_init, "create a Sciweave project (folders + .sciweave/)")
+    s = cmd("init", cmd_init, "create a SciWeave project (folders + .sciweave/)")
     s.add_argument("path", nargs="?", default=".")
     s.add_argument("--name")
     s.add_argument("--description")
@@ -446,7 +446,7 @@ def _article_args(args):
     a = args.args
     need = {"new": 1, "place": 2, "sync": 1, "show": 1}[args.action]
     if len(a) != need:
-        raise SciweaveError(f"article {args.action} expects {need} argument(s), got {len(a)}")
+        raise SciWeaveError(f"article {args.action} expects {need} argument(s), got {len(a)}")
     if args.action == "new":
         args.title = a[0]
     elif args.action == "place":
@@ -466,7 +466,7 @@ def main(argv=None) -> int:
         if args.cmd == "article":
             _article_args(args)
         args.fn(args)
-    except SciweaveError as exc:
+    except SciWeaveError as exc:
         print(f"sciweave: {exc}", file=sys.stderr)
         return 1
     return 0

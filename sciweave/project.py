@@ -31,7 +31,7 @@ PROCESS_TYPES = {"pipeline", "step", "script"}
 SOFT_RELS = {"documents", "related"}   # informational links: never propagate staleness
 
 
-class SciweaveError(Exception):
+class SciWeaveError(Exception):
     """A user-facing error: the message is printed as-is by the CLI."""
 
 
@@ -104,7 +104,7 @@ class Project:
         SCIWEAVE.md are added, no data/results/... folders are created."""
         root = Path(root).resolve()
         if (root / STATE_DIR / "graph.json").exists():
-            raise SciweaveError(f"{root} is already a Sciweave project")
+            raise SciWeaveError(f"{root} is already a SciWeave project")
         root.mkdir(parents=True, exist_ok=True)
         for sub in ("objects", "plans"):
             (root / STATE_DIR / sub).mkdir(parents=True, exist_ok=True)
@@ -131,8 +131,8 @@ class Project:
         for d in [here, *here.parents]:
             if (d / STATE_DIR / "graph.json").exists():
                 return cls(d)
-        raise SciweaveError(
-            f"no Sciweave project found at or above {here} (run `sciweave init` first, or pass --project)"
+        raise SciWeaveError(
+            f"no SciWeave project found at or above {here} (run `sciweave init` first, or pass --project)"
         )
 
     def load(self) -> None:
@@ -165,7 +165,7 @@ class Project:
     def node(self, node_id: str) -> dict:
         n = self.nodes.get(node_id)
         if n is None:
-            raise SciweaveError(f"unknown node '{node_id}' (see `sciweave ls`)")
+            raise SciWeaveError(f"unknown node '{node_id}' (see `sciweave ls`)")
         return n
 
     def resolve(self, path_str: str | None) -> Path | None:
@@ -230,11 +230,11 @@ class Project:
         [{"path": ..., "ts": "2026-09-04T18:19:00+00:00", "message": ...}]. They become
         v1..vN (content stored), and the current file becomes the latest version."""
         if node_type not in NODE_TYPES:
-            raise SciweaveError(f"unknown node type '{node_type}' (one of: {', '.join(NODE_TYPES)})")
+            raise SciWeaveError(f"unknown node type '{node_type}' (one of: {', '.join(NODE_TYPES)})")
         if mode not in MODES:
-            raise SciweaveError(f"mode must be one of {MODES}, got '{mode}'")
+            raise SciWeaveError(f"mode must be one of {MODES}, got '{mode}'")
         if node_id and node_id in self.nodes:
-            raise SciweaveError(f"node id '{node_id}' already exists")
+            raise SciWeaveError(f"node id '{node_id}' already exists")
         nid = node_id or self.next_id(node_type)
 
         stored_path = None
@@ -243,7 +243,7 @@ class Project:
             if not src.is_absolute():
                 src = (Path.cwd() / src)
             if not src.exists():
-                raise SciweaveError(f"path does not exist: {src}")
+                raise SciWeaveError(f"path does not exist: {src}")
             src = src.resolve()
             if mode == "managed":
                 inside = self._is_inside(src)
@@ -256,7 +256,7 @@ class Project:
                 target = Path(target).resolve()
                 if target != src:
                     if target.exists():
-                        raise SciweaveError(f"destination already exists: {self.rel(target)} (choose --dest)")
+                        raise SciWeaveError(f"destination already exists: {self.rel(target)} (choose --dest)")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     if src.is_dir():
                         shutil.copytree(src, target)
@@ -297,7 +297,7 @@ class Project:
 
     def _historical_version(self, node: dict, src: Path, ts: str | None, message: str) -> dict | None:
         if not src.exists() or not src.is_file():
-            raise SciweaveError(f"{node['id']}: history file not found: {src}")
+            raise SciWeaveError(f"{node['id']}: history file not found: {src}")
         fp = fingerprint(src)
         last = node["versions"][-1] if node["versions"] else None
         if last and last["hash"] == fp["hash"]:
@@ -358,7 +358,7 @@ class Project:
                      refresh_edges: bool = True) -> dict | None:
         path = self.resolve(node["path"])
         if path is None or not path.exists():
-            raise SciweaveError(f"{node['id']}: file is missing on disk ({node['path']})")
+            raise SciWeaveError(f"{node['id']}: file is missing on disk ({node['path']})")
         fp = fingerprint(path)
         last = node["versions"][-1] if node["versions"] else None
         if last and last["hash"] == fp["hash"]:
@@ -396,7 +396,7 @@ class Project:
         """Snapshot the node's file as a new version. None if unchanged."""
         node = self.node(node_id)
         if not node["path"]:
-            raise SciweaveError(f"{node_id} has no file path to version")
+            raise SciWeaveError(f"{node_id} has no file path to version")
         v = self._new_version(node, message=message, actor=actor, refresh_edges=refresh_edges)
         if v:
             self.log("version_saved", node=node_id, detail=message or f"v{v['v']}", actor=actor,
@@ -406,10 +406,10 @@ class Project:
     def mark_final(self, node_id: str, version: int | None = None, actor: str = "user") -> int:
         node = self.node(node_id)
         if not node["versions"]:
-            raise SciweaveError(f"{node_id} has no versions yet (save it first)")
+            raise SciWeaveError(f"{node_id} has no versions yet (save it first)")
         v = version or node["current_version"]
         if not any(x["v"] == v for x in node["versions"]):
-            raise SciweaveError(f"{node_id} has no version {v}")
+            raise SciWeaveError(f"{node_id} has no version {v}")
         node["final_version"] = v
         self.log("marked_final", node=node_id, detail=f"v{v}", actor=actor, version=v)
         return v
@@ -418,7 +418,7 @@ class Project:
         for v in self.node(node_id)["versions"]:
             if v["v"] == version:
                 return v
-        raise SciweaveError(f"{node_id} has no version {version}")
+        raise SciWeaveError(f"{node_id} has no version {version}")
 
     def object_path(self, version: dict) -> Path | None:
         return (self.objects / version["stored"]) if version.get("stored") else None
@@ -429,7 +429,7 @@ class Project:
         v = self.get_version(node_id, version)
         obj = self.object_path(v)
         if obj is None or not obj.exists():
-            raise SciweaveError(
+            raise SciWeaveError(
                 f"{node_id} v{version} has no stored content (ref nodes and very large files are "
                 f"fingerprinted only)")
         target = Path(out).resolve() if out else self.resolve(node["path"])
@@ -437,7 +437,7 @@ class Project:
             cur = fingerprint(target)
             last = node["versions"][-1]
             if cur["hash"] != last["hash"]:
-                raise SciweaveError(
+                raise SciWeaveError(
                     f"{node['path']} has unsaved changes; `sciweave save {node_id}` first or use --force")
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(obj, target)
@@ -464,25 +464,25 @@ class Project:
              script: str | None = None, command: str | None = None, note: str = "",
              label: str | None = None, params_file: str | None = None, actor: str = "user") -> dict:
         if rel not in EDGE_RELATIONS:
-            raise SciweaveError(f"unknown relation '{rel}' (one of: {', '.join(EDGE_RELATIONS)})")
+            raise SciWeaveError(f"unknown relation '{rel}' (one of: {', '.join(EDGE_RELATIONS)})")
         src, dst = self.node(source), self.node(target)
         if source == target:
-            raise SciweaveError("a node cannot link to itself")
+            raise SciWeaveError("a node cannot link to itself")
         if self._reaches(target, source):
-            raise SciweaveError(f"linking {source} -> {target} would create a cycle")
+            raise SciWeaveError(f"linking {source} -> {target} would create a cycle")
         params = params or {}
         bad = [k for k, v in params.items() if not is_scalar_param(v)]
         if bad:
-            raise SciweaveError(f"parameters must be scalars or lists of scalars: {', '.join(bad)}")
+            raise SciWeaveError(f"parameters must be scalars or lists of scalars: {', '.join(bad)}")
         if script:
             sc = self.node(script)
             if sc["type"] not in ("script", "pipeline", "step"):
-                raise SciweaveError(f"--script must point to a script/pipeline/step node, {script} is a {sc['type']}")
+                raise SciWeaveError(f"--script must point to a script/pipeline/step node, {script} is a {sc['type']}")
         pf = None
         if params_file:
             pf_path = Path(params_file).expanduser().resolve()
             if not pf_path.exists():
-                raise SciweaveError(f"params file not found: {pf_path}")
+                raise SciWeaveError(f"params file not found: {pf_path}")
             fp = fingerprint(pf_path)
             stored = self._store_object(pf_path, fp["hash"]) if fp["exact"] and fp["kind"] == "file" else None
             pf = {"path": self.rel(pf_path), "hash": fp["hash"], "stored": stored}
@@ -533,7 +533,7 @@ class Project:
         before = len(self.edges)
         self.graph["edges"] = [e for e in self.edges if e["id"] != edge_id]
         if len(self.edges) == before:
-            raise SciweaveError(f"unknown edge '{edge_id}'")
+            raise SciWeaveError(f"unknown edge '{edge_id}'")
         self.log("edge_removed", edge=edge_id, actor=actor)
 
     def _reaches(self, start: str, goal: str) -> bool:

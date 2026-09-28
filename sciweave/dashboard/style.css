@@ -1,4 +1,4 @@
-/* Sciweave dashboard. Chrome + data colors are tokens; dark values declared for
+/* SciWeave dashboard. Chrome + data colors are tokens; dark values declared for
    both the OS preference and the explicit toggle. Category hues: validated
    all-pairs (blue / yellow / aqua) + two neutrals; node identity is never
    color-alone (every node also carries a type icon and its code). Edge red /

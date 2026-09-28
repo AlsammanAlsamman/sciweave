@@ -23,7 +23,7 @@ from sciweave.trace import describe, edge_line, fmt_params
 DEFAULT_MODEL = "claude-opus-5"
 ID_RE = re.compile(r"\b([A-Z]{1,4}\d+[a-z]?)\b")  # T1, SF7a, ST10
 
-SYSTEM = """You are the assistant inside Sciweave, a provenance network for a research project
+SYSTEM = """You are the assistant inside SciWeave, a provenance network for a research project
 (bioinformatics / data analysis). You are given the whole project graph as text: nodes
 (raw data, inputs, pipelines, scripts, tables, figures, supplements, article sections)
 and directed edges (what fed what), each edge with the result-changing parameters, script

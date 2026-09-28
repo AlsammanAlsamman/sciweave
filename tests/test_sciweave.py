@@ -6,7 +6,7 @@ import pytest
 from sciweave import ai, article, plan
 from sciweave.cli import main
 from sciweave.export import render_dashboard
-from sciweave.project import Project, SciweaveError
+from sciweave.project import Project, SciWeaveError
 from sciweave.server import preview
 
 
@@ -44,7 +44,7 @@ def test_init_layout(proj):
     assert (proj.root / ".sciweave" / "graph.json").exists()
     assert (proj.root / "results" / "figures").is_dir()
     assert (proj.root / "SCIWEAVE.md").exists()
-    with pytest.raises(SciweaveError):
+    with pytest.raises(SciWeaveError):
         Project.init(proj.root)
 
 
@@ -71,7 +71,7 @@ def test_ref_is_not_copied(proj, tmp_path):
 
 
 def test_cycle_rejected(chain, proj):
-    with pytest.raises(SciweaveError, match="cycle"):
+    with pytest.raises(SciWeaveError, match="cycle"):
         proj.link(chain["fig"], chain["cov"])
 
 
@@ -125,7 +125,7 @@ def test_final_and_restore(chain, proj):
     proj.mark_final(fid, 1)
     assert proj.nodes[fid]["final_version"] == 1
     path.write_text("<svg unsaved/>", encoding="utf-8")
-    with pytest.raises(SciweaveError, match="unsaved"):
+    with pytest.raises(SciWeaveError, match="unsaved"):
         proj.restore(fid, 1)
     out = proj.restore(fid, 1, out=str(proj.root / "old.svg"))
     assert out.read_text() == "<svg/>"
@@ -193,7 +193,7 @@ def test_plan_errors_block_apply(proj, tmp_path):
     assert not rep.passed
     for needle in ("unknown type", "needs a label", "does not exist", "NOPE", "unknown rel"):
         assert needle in text
-    with pytest.raises(SciweaveError):
+    with pytest.raises(SciWeaveError):
         plan.apply(proj, bad)
     assert proj.nodes == {}
 
@@ -300,6 +300,6 @@ def test_failed_apply_rolls_back_history(proj, tmp_path):
     before = len(proj.history())
     bad = {"sciweave_plan": 1, "summary": "x", "nodes": [{"key": "a", "type": "note", "label": "a"}],
            "final": [{"node": "a"}]}   # passes check, fails at apply (no versions)
-    with pytest.raises(SciweaveError):
+    with pytest.raises(SciWeaveError):
         plan.apply(proj, bad)
     assert len(proj.history()) == before and proj.nodes == {}

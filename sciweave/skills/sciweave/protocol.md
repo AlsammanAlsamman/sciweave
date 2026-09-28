@@ -1,4 +1,4 @@
-# Sciweave import protocol — full reference
+# SciWeave import protocol — full reference
 
 ## Node types
 

@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from sciweave import ai
 from sciweave.article import article_summary
 from sciweave.export import render_dashboard
-from sciweave.project import Project, SciweaveError
+from sciweave.project import Project, SciWeaveError
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
 TABLE_EXT = {".csv", ".tsv", ".txt", ".tab"}
@@ -106,7 +106,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/file":
                 return self._file(q)
             return self._json({"error": "not found"}, 404)
-        except SciweaveError as exc:
+        except SciWeaveError as exc:
             return self._json({"error": str(exc)}, 400)
         except (KeyError, ValueError) as exc:
             return self._json({"error": f"bad request: {exc}"}, 400)
@@ -158,7 +158,7 @@ class Handler(BaseHTTPRequestHandler):
                     p.commit()
                     return self._json({"ok": True, "message": f"restored to {p.rel(t)}"})
             return self._json({"error": "not found"}, 404)
-        except SciweaveError as exc:
+        except SciWeaveError as exc:
             return self._json({"error": str(exc)}, 400)
         except (KeyError, ValueError) as exc:
             return self._json({"error": f"bad request: {exc}"}, 400)
@@ -170,7 +170,7 @@ def serve(p: Project, port: int = 8765, open_browser: bool = True, host: str = "
     Handler.project_root = p.root
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
-    print(f"Sciweave dashboard for '{p.graph['project']['name']}' at {url}  (Ctrl+C to stop)")
+    print(f"SciWeave dashboard for '{p.graph['project']['name']}' at {url}  (Ctrl+C to stop)")
     if open_browser:
         import webbrowser
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

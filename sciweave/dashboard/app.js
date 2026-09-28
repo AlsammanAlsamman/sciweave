@@ -1,4 +1,4 @@
-/* Sciweave dashboard app. Plain ES5 + D3 v7 (vendored inline), no build step.
+/* SciWeave dashboard app. Plain ES5 + D3 v7 (vendored inline), no build step.
  * Data: window.SCIWEAVE_DATA (static export) or GET /api/graph (serve mode).
  * Views: force (group halos) · radial (tree + bundled provenance) · lineage (layered DAG).
  */
@@ -78,7 +78,7 @@
       outEdges[e.source].push(e); inEdges[e.target].push(e);
     });
     document.getElementById('proj-name').textContent = '· ' + DATA.project.name;
-    document.title = DATA.project.name + ' · Sciweave';
+    document.title = DATA.project.name + ' · SciWeave';
   }
 
   // provenance walk; documents/related links are informational and not followed
@@ -517,7 +517,7 @@
     if (cleanup) cleanup();
     hideTip();
     if (!DATA.nodes.length) {
-      vizEl.innerHTML = '<div class="empty-hint">No nodes yet. Add some with <code>sciweave add</code> or ask Claude to import results with the Sciweave protocol.</div>';
+      vizEl.innerHTML = '<div class="empty-hint">No nodes yet. Add some with <code>sciweave add</code> or ask Claude to import results with the SciWeave protocol.</div>';
       cleanup = null;
     } else {
       cleanup = (VIEWS[state.view] || renderForce)();

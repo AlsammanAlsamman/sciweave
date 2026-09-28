@@ -1,4 +1,4 @@
-# Sciweave — notes for developing this repo
+# SciWeave — notes for developing this repo
 
 - `DESIGN.md` is the living plan and roadmap; keep it current when behavior changes.
 - One contract: `.sciweave/graph.json`, mutated only through `sciweave/project.py::Project`.

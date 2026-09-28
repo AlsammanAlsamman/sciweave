@@ -1,6 +1,6 @@
-# Sciweave — design & plan
+# SciWeave — design & plan
 
-> **Sciweave weaves a research project's raw data, pipelines, parameters, scripts,
+> **SciWeave weaves a research project's raw data, pipelines, parameters, scripts,
 > tables, figures and article into one provenance network — so you can always
 > answer "how was this made, with what, and is it still up to date?"**
 
@@ -123,7 +123,7 @@ When F1 changes, the placement turns stale; `sciweave article sync A1` refreshes
 ## 7. The Claude protocol (skill)
 
 Installed with `sciweave install-skill` into `~/.claude/skills/sciweave/`.
-When the user says *"add these results to the Sciweave project"*:
+When the user says *"add these results to the SciWeave project"*:
 
 1. **Locate** the project (`sciweave status`), read `SCIWEAVE.md`.
 2. **Inspect** what was just done in the session: outputs, scripts, commands,
