@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · Sciweave</title>
+<link rel="icon" type="image/png" href="__LOGO__">
+<script>
+  // theme before first paint: explicit choice wins, else OS preference (CSS handles that)
+  try { var t = localStorage.getItem('sciweave-theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch (e) {}
+</script>
+<style>
+__CSS__
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <img src="__LOGO__" alt="" width="28" height="28" style="border-radius:7px">
+    Sciweave <span class="proj" id="proj-name"></span>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-page="network">Network</button>
+    <button class="tab" data-page="articles">Articles</button>
+    <button class="tab" data-page="history">History</button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="search" title="Highlight nodes as you type (id, label, type, tag, parameter)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+    <input id="search" placeholder="Highlight… (F1, finemap, L=10)" autocomplete="off">
+  </div>
+  <button class="icon-btn" id="ask-toggle" title="Ask about this project">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+  </button>
+  <button class="icon-btn" id="live-toggle" title="Auto-refresh every 5 s">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+  </button>
+  <button class="icon-btn" id="theme-toggle" title="Light / dark">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+  </button>
+</header>
+
+<main>
+  <section class="page active" id="page-network">
+    <div class="toolbar">
+      <label>View
+        <select class="ctl" id="view-select">
+          <option value="force">Force network · group halos</option>
+          <option value="radial">Radial tree · provenance bundles</option>
+          <option value="lineage">Lineage · left → right</option>
+        </select>
+      </label>
+      <label>Group by
+        <select class="ctl" id="group-select">
+          <option value="category">Category (sources / process / outputs / writing)</option>
+          <option value="type">Node type</option>
+          <option value="group">Custom group</option>
+          <option value="article">Article</option>
+          <option value="state">Status</option>
+        </select>
+      </label>
+      <label title="Reference nodes (intermediates kept in their pipeline folders)"><input type="checkbox" id="show-refs" checked> references</label>
+      <label><input type="checkbox" id="show-code" checked> script links</label>
+      <label><input type="checkbox" id="show-params"> parameters on links</label>
+      <label><input type="checkbox" id="show-legend" checked> legend</label>
+      <span class="spacer"></span>
+      <span class="muted" id="counts"></span>
+      <button class="btn" id="fit-btn" title="Fit to screen">Fit</button>
+    </div>
+    <div class="stage">
+      <div id="viz"></div>
+      <div class="askbar" id="askbar">
+        <form id="ask-form">
+          <input id="ask-input" placeholder="Ask: how was F2 made? · what is stale? · which parameters used LD panel?">
+          <button class="btn primary" type="submit">Ask</button>
+          <button class="btn" type="button" id="ask-clear">Clear</button>
+        </form>
+        <div class="answer" id="ask-answer"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+      <aside class="panel" id="panel"></aside>
+    </div>
+  </section>
+
+  <section class="page" id="page-articles"><div class="scroll" id="articles"></div></section>
+  <section class="page" id="page-history"><div class="scroll" id="history"></div></section>
+</main>
+
+<div class="tooltip" id="tooltip"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+__D3__
+</script>
+<script>
+window.SCIWEAVE_LIVE = __LIVE__;
+window.SCIWEAVE_DATA = __DATA__;
+</script>
+<script>
+__APP__
+</script>
+</body>
+</html>

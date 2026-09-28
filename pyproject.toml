@@ -1,0 +1,43 @@
+[project]
+name = "sciweave"
+version = "0.1.0"
+description = "Weave raw data, pipelines, parameters, tables, figures and your article into one versioned provenance network — built to be driven by Claude."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Alsamman M. Alsamman", email = "aalsamman100@gmail.com" },
+]
+keywords = ["provenance", "reproducibility", "bioinformatics", "research", "claude", "lineage", "versioning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = []
+
+[project.optional-dependencies]
+ai = ["anthropic>=0.60"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+sciweave = "sciweave.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sciweave*"]
+
+[tool.setuptools.package-data]
+# dashboard assets, vendored D3 (inlined into the HTML: no CDN, works offline)
+# and the Claude skill must ship inside the wheel, not just the source tree
+sciweave = ["dashboard/*", "vendor/*", "skills/sciweave/*"]

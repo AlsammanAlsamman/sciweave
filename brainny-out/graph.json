@@ -1,0 +1,45 @@
+{
+  "nodes": [
+    {
+      "kind": "technique",
+      "title": "Provenance staleness: record effective-parent versions per output version, traversing through process nodes",
+      "summary": "In a provenance/lineage graph, don't decide staleness per edge (edge.source_version refreshed when the target is saved). When a pipeline has several outputs and only one is regenerated, the refresh of the pipeline's input edges silently marks the siblings fresh. Instead each saved version of a data node records the versions of its effective parents: direct sources plus, through process nodes (pipeline/step/script), the inputs of the process that made it.",
+      "detail": "Rules that worked in Sciweave: data node stale if any effective parent's current version != recorded one, or a data parent is itself stale; process nodes are never 'rebuilt', they are flagged 're-run needed' when any of their outputs recorded an older input version; article placements compare placed version vs final/current; informational links (documents/related) never propagate. On new links, setdefault the current versions into the target's latest version (or into all outputs of a process target). A 'cosmetic save' copies the previous version's parents so a font-only re-render stays stale.",
+      "domain": "reproducibility / provenance tracking",
+      "tags": [
+        "provenance",
+        "staleness",
+        "lineage",
+        "dag",
+        "versioning",
+        "pipelines"
+      ],
+      "trigger": null,
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0001",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "2026-09-28-sciweave-build",
+          "ts": "2026-09-28T16:05:06+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "2026-09-28-sciweave-build",
+          "ts": "2026-09-28T16:05:06+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-09-28T16:05:06+00:00"
+    }
+  ]
+}
