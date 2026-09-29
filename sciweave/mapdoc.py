@@ -40,14 +40,34 @@ def render_map(p: "Project") -> str:
             lines.append(f"- **{nid}** · {p.nodes[nid]['label']} — {'; '.join(status[nid]['reasons'][:2])}")
         lines.append("")
 
+    if p.steps:
+        summ = p.step_summary()
+        lab = {k: v["label"] for k, v in p.steps.items()}
+        lines += ["## Steps (analysis stages)", ""]
+        for k, st in sorted(p.steps.items(), key=lambda kv: kv[1].get("order", 0)):
+            s = summ.get(k, {"members": [], "within": 0, "in": {}, "out": {}})
+            lines.append(f"### {st.get('order', '')}. {st['label']} (`{k}`)")
+            if st.get("description"):
+                lines.append(st["description"])
+            lines.append(", ".join(f"{m} · {_cell(p.nodes[m]['label'])}" for m in sorted(s["members"])) or "(empty)")
+            flow = [f"{s['within']} links within"]
+            if s["in"]:
+                flow.append("in from " + ", ".join(f"{lab.get(x, '(no step)')} ({n})" for x, n in s["in"].items()))
+            if s["out"]:
+                flow.append("out to " + ", ".join(f"{lab.get(x, '(no step)')} ({n})" for x, n in s["out"].items()))
+            lines += ["", "*" + " · ".join(flow) + "*", ""]
+        if None in summ:
+            lines += [f"**No step yet:** {', '.join(sorted(summ[None]['members']))}", ""]
+
     for cat in CATEGORIES:
         rows = [n for n in p.nodes.values() if NODE_TYPES[n["type"]]["category"] == cat]
         if not rows:
             continue
-        lines += [f"## {cat.capitalize()}", "", "| ID | Label | Type | Mode | Path | Version | Final |", "|---|---|---|---|---|---|---|"]
+        lines += [f"## {cat.capitalize()}", "", "| ID | Label | Type | Step | Mode | Path | Version | Final |",
+                  "|---|---|---|---|---|---|---|---|"]
         for n in sorted(rows, key=lambda x: (x["type"], x["id"])):
             lines.append(
-                f"| {n['id']} | {_cell(n['label'])} | {n['type']} | {n['mode']} | `{_cell(n['path'] or '')}` | "
+                f"| {n['id']} | {_cell(n['label'])} | {n['type']} | {n.get('step') or ''} | {n['mode']} | `{_cell(n['path'] or '')}` | "
                 f"{('v' + str(n['current_version'])) if n['current_version'] else '-'} | "
                 f"{('v' + str(n['final_version'])) if n['final_version'] else ''} |"
             )
@@ -57,6 +77,27 @@ def render_map(p: "Project") -> str:
         lines += ["## Links (provenance)", "", "Red = carries result-changing parameters; green = none.", ""]
         for e in p.edges:
             lines.append(f"- `{e['id']}` {edge_line(p, e)}")
+        lines.append("")
+
+    fams = {}
+    for nid, n in p.nodes.items():
+        if n.get("branch"):
+            fams.setdefault(p.branch_family(nid)[0], None)
+    if fams:
+        lines += ["## Branches (alternative analyses)", ""]
+        for root in fams:
+            for x in p.branch_family(root):
+                b = p.nodes[x].get("branch") or {}
+                lines.append(f"- {'**' + x + '**' if b.get('status') == 'main' else x} · {_cell(p.nodes[x]['label'])} "
+                             f"— {b.get('status', 'main')}" + (f" — why: {b['why']}" if b.get("why") else ""))
+            lines.append("")
+
+    recent = sorted(((v["ts"], nid, v) for nid, n in p.nodes.items() for v in n["versions"] if v.get("why")),
+                    reverse=True)[:12]
+    if recent:
+        lines += ["## Recent updates and why", ""]
+        for ts, nid, v in recent:
+            lines.append(f"- {ts[:10]} **{nid}** v{v['v']}: {_cell(v.get('message', ''))} — why: {_cell(v['why'])}")
         lines.append("")
 
     if g["groups"]:

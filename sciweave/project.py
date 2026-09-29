@@ -14,6 +14,7 @@ import shutil
 from pathlib import Path
 
 from sciweave.schema import (
+    BRANCH_STATUSES,
     EDGE_RELATIONS,
     MODES,
     NODE_TYPES,
@@ -28,7 +29,7 @@ MAX_SNAPSHOT_BYTES = 200 * 1024 * 1024   # bigger managed files are fingerprinte
 MAX_HASH_BYTES = 512 * 1024 * 1024       # bigger ref files use size+mtime fingerprint
 MAX_DIR_ENTRIES = 20000
 PROCESS_TYPES = {"pipeline", "step", "script"}
-SOFT_RELS = {"documents", "related"}   # informational links: never propagate staleness
+SOFT_RELS = {"documents", "related", "variant"}   # informational links: never propagate staleness
 
 
 class SciWeaveError(Exception):
@@ -119,6 +120,7 @@ class Project:
             "nodes": {},
             "edges": [],
             "groups": {},
+            "steps": {},
         }
         p.save_graph()
         p.log("project_created", detail=p.graph["project"]["name"])
@@ -139,6 +141,7 @@ class Project:
         self.graph = json.loads(self.graph_file.read_text(encoding="utf-8"))
         self.graph.setdefault("counters", {})
         self.graph.setdefault("groups", {})
+        self.graph.setdefault("steps", {})
 
     def save_graph(self) -> None:
         self.state.mkdir(parents=True, exist_ok=True)
@@ -225,7 +228,7 @@ class Project:
     def add_node(self, node_type: str, label: str, path: str | None = None, mode: str = "ref",
                  dest: str | None = None, description: str = "", groups=(), tags=(),
                  meta: dict | None = None, node_id: str | None = None, actor: str = "user",
-                 message: str = "added", history: list | None = None) -> dict:
+                 message: str = "added", history: list | None = None, step: str | None = None) -> dict:
         """history: older copies of this item, oldest first, as
         [{"path": ..., "ts": "2026-09-04T18:19:00+00:00", "message": ...}]. They become
         v1..vN (content stored), and the current file becomes the latest version."""
@@ -274,6 +277,7 @@ class Project:
             "path": stored_path,
             "mode": mode,
             "description": description,
+            "step": self._ensure_step(step, actor) if step else None,
             "groups": list(groups),
             "tags": list(tags),
             "meta": meta or {},
@@ -315,6 +319,9 @@ class Project:
     def update_node(self, node_id: str, actor: str = "user", **fields) -> dict:
         node = self.node(node_id)
         allowed = {"label", "description", "tags", "groups", "meta", "path"}
+        if fields.get("step") is not None:
+            fields["step"] = self._ensure_step(fields["step"], actor)
+            allowed.add("step")
         changed = []
         for k, v in fields.items():
             if v is None or k not in allowed:
@@ -354,8 +361,36 @@ class Project:
             shutil.copy2(path, dst)
         return rel
 
+    def _changes_since(self, last: dict | None, parents: dict, edge_params: dict, fp: dict) -> list[dict]:
+        """What differs from the previous version: inputs / scripts that moved to a new
+        version, inputs added or dropped, parameters changed on incoming links, file size."""
+        if not last:
+            return []
+        out: list[dict] = []
+        before = last.get("parents", {})
+        for pid, ver in parents.items():
+            kind = "script" if self.nodes.get(pid, {}).get("type") in PROCESS_TYPES else "input"
+            if pid not in before:
+                out.append({"kind": "added_" + kind, "node": pid, "to": ver})
+            elif before[pid] != ver:
+                out.append({"kind": kind, "node": pid, "from": before[pid], "to": ver})
+        for pid, ver in before.items():
+            if pid not in parents:
+                out.append({"kind": "dropped_input", "node": pid, "from": ver})
+        old_params = last.get("edge_params", {})
+        for eid, params in edge_params.items():
+            prev = old_params.get(eid, {})
+            src = next((e["source"] for e in self.edges if e["id"] == eid), None)
+            for k in sorted(set(prev) | set(params)):
+                if prev.get(k) != params.get(k):
+                    out.append({"kind": "param", "edge": eid, "source": src, "key": k,
+                                "from": prev.get(k), "to": params.get(k)})
+        if last.get("size") is not None and fp["size"] != last["size"]:
+            out.append({"kind": "content", "from": last["size"], "to": fp["size"]})
+        return out
+
     def _new_version(self, node: dict, message: str = "", actor: str = "user",
-                     refresh_edges: bool = True) -> dict | None:
+                     refresh_edges: bool = True, why: str = "") -> dict | None:
         path = self.resolve(node["path"])
         if path is None or not path.exists():
             raise SciWeaveError(f"{node['id']}: file is missing on disk ({node['path']})")
@@ -373,9 +408,12 @@ class Project:
                     e["source_version"] = self.nodes[e["source"]]["current_version"]
         else:  # cosmetic change: still built from the same inputs as before
             parents = dict(last.get("parents", {}))
+        edge_params = {e["id"]: dict(e["params"]) for e in self.incoming(node["id"]) if e.get("params")}
         v = {
             "v": (last["v"] + 1) if last else 1,
             "ts": now_iso(),
+            "why": why,
+            "changes": self._changes_since(last, parents, edge_params, fp),
             "hash": fp["hash"],
             "size": fp["size"],
             "mtime": fp.get("mtime"),
@@ -384,7 +422,7 @@ class Project:
             "message": message,
             "actor": actor,
             "parents": parents,
-            "edge_params": {e["id"]: e.get("params", {}) for e in self.incoming(node["id"]) if e.get("params")},
+            "edge_params": edge_params,
         }
         node["versions"].append(v)
         node["current_version"] = v["v"]
@@ -392,15 +430,19 @@ class Project:
         return v
 
     def save_version(self, node_id: str, message: str = "", actor: str = "user",
-                     refresh_edges: bool = True) -> dict | None:
-        """Snapshot the node's file as a new version. None if unchanged."""
+                     refresh_edges: bool = True, why: str = "") -> dict | None:
+        """Snapshot the node's file as a new version. None if unchanged.
+
+        message = what changed (short); why = the reason, kept with the version and shown
+        in the dashboard. The concrete differences (inputs, scripts, params, size) are
+        computed automatically into version["changes"]."""
         node = self.node(node_id)
         if not node["path"]:
             raise SciWeaveError(f"{node_id} has no file path to version")
-        v = self._new_version(node, message=message, actor=actor, refresh_edges=refresh_edges)
+        v = self._new_version(node, message=message, actor=actor, refresh_edges=refresh_edges, why=why)
         if v:
             self.log("version_saved", node=node_id, detail=message or f"v{v['v']}", actor=actor,
-                     version=v["v"])
+                     version=v["v"], why=why or None, changes=len(v["changes"]) or None)
         return v
 
     def mark_final(self, node_id: str, version: int | None = None, actor: str = "user") -> int:
@@ -462,7 +504,8 @@ class Project:
 
     def link(self, source: str, target: str, rel: str = "feeds", params: dict | None = None,
              script: str | None = None, command: str | None = None, note: str = "",
-             label: str | None = None, params_file: str | None = None, actor: str = "user") -> dict:
+             label: str | None = None, params_file: str | None = None, actor: str = "user",
+             why: str = "") -> dict:
         if rel not in EDGE_RELATIONS:
             raise SciWeaveError(f"unknown relation '{rel}' (one of: {', '.join(EDGE_RELATIONS)})")
         src, dst = self.node(source), self.node(target)
@@ -490,7 +533,11 @@ class Project:
         existing = self.find_edge(source, target, rel)
         if existing:
             e = existing
-            e["params"] = {**e.get("params", {}), **params}
+            old = dict(e.get("params", {}))
+            e["params"] = {**old, **params}
+            diff = {k: [old.get(k), v] for k, v in params.items() if old.get(k) != v}
+            if diff:
+                e.setdefault("changes", []).append({"ts": now_iso(), "actor": actor, "why": why, "params": diff})
             for k, v in (("command", command), ("note", note or None), ("label", label), ("params_file", pf)):
                 if v:
                     e[k] = v
@@ -499,7 +546,7 @@ class Project:
                 e["script_version"] = self.nodes[script]["current_version"]
             e["updated"] = now_iso()
             self.log("edge_updated", edge=e["id"], detail=f"{source} -{rel}-> {target}", actor=actor,
-                     nodes=[source, target], params=params or None)
+                     nodes=[source, target], params=params or None, why=why or None)
         else:
             self.graph["counters"]["E"] = self.graph["counters"].get("E", 0) + 1
             e = {
@@ -520,7 +567,7 @@ class Project:
             }
             self.edges.append(e)
             self.log("edge_added", edge=e["id"], detail=f"{source} -{rel}-> {target}", actor=actor,
-                     nodes=[source, target], params=params or None)
+                     nodes=[source, target], params=params or None, why=why or None)
         if script and not self.find_edge(script, target) and script != source:
             self.link(script, target, rel="code", actor=actor)
         affected = self.process_outputs(target) if dst["type"] in PROCESS_TYPES else [target]
@@ -547,6 +594,150 @@ class Project:
             seen.add(cur)
             stack.extend(e["target"] for e in self.outgoing(cur))
         return False
+
+    # --------------------------------------------------------------- steps ----
+    # A step is a stage of the analysis (GWAS, meta-analysis, fine-mapping, ...,
+    # article writing). Every object belongs to one step; steps have an order, so the
+    # network can show each step as an oval and the links within / between steps.
+
+    @property
+    def steps(self) -> dict:
+        return self.graph.setdefault("steps", {})
+
+    def define_step(self, key: str, label: str | None = None, order: int | None = None,
+                    description: str = "", actor: str = "user") -> dict:
+        key = key.strip()
+        if not key or " " in key:
+            raise SciWeaveError("step key must be one word, e.g. 'gwas' or 'finemapping'")
+        st = self.steps.get(key, {})
+        is_new = not st
+        st["label"] = label or st.get("label") or key.replace("_", " ").replace("-", " ").capitalize()
+        if order is not None:
+            st["order"] = order
+        st.setdefault("order", max([s.get("order", 0) for s in self.steps.values()] + [0]) + 1)
+        if description:
+            st["description"] = description
+        st.setdefault("description", "")
+        self.steps[key] = st
+        self.log("step_defined" if is_new else "step_updated", detail=f"{key}: {st['label']} (#{st['order']})",
+                 actor=actor)
+        return st
+
+    def _ensure_step(self, key: str, actor: str = "user") -> str:
+        if key not in self.steps:
+            self.define_step(key, actor=actor)
+        return key
+
+    def set_step(self, node_ids, key: str | None, actor: str = "user") -> list[str]:
+        if key:
+            self._ensure_step(key, actor)
+        done = []
+        for nid in node_ids:
+            n = self.node(nid)
+            if n.get("step") != key:
+                n["step"] = key
+                done.append(nid)
+        if done:
+            self.log("step_assigned", detail=f"{key or '(none)'}: {', '.join(done)}", actor=actor, nodes=done)
+        return done
+
+    def step_summary(self) -> dict:
+        """Per step: members by type, links within, and links in from / out to other steps."""
+        out = {k: {"members": [], "within": 0, "in": {}, "out": {}} for k in self.steps}
+        out.setdefault(None, {"members": [], "within": 0, "in": {}, "out": {}})
+        for nid, n in self.nodes.items():
+            out.setdefault(n.get("step"), {"members": [], "within": 0, "in": {}, "out": {}})["members"].append(nid)
+        for e in self.edges:
+            a = self.nodes.get(e["source"], {}).get("step")
+            b = self.nodes.get(e["target"], {}).get("step")
+            if a == b:
+                out[a]["within"] += 1
+            else:
+                out[a]["out"][b] = out[a]["out"].get(b, 0) + 1
+                out[b]["in"][a] = out[b]["in"].get(a, 0) + 1
+        if not out[None]["members"]:
+            del out[None]
+        return out
+
+    # ------------------------------------------------------------ branches ----
+    # A branch is an alternative version of an analysis that should live NEXT to the
+    # original instead of overwriting it: other parameters (L=5 vs L=10), another
+    # input set, another method. It copies the original's provenance links (with the
+    # overridden parameters), is joined to it by a `variant` link, and carries
+    # {"of", "name", "why", "status"}. One member of a family is "main".
+
+    def branch_family(self, node_id: str) -> list[str]:
+        root = node_id
+        seen = {root}
+        while (self.nodes[root].get("branch") or {}).get("of") and self.nodes[root]["branch"]["of"] in self.nodes:
+            root = self.nodes[root]["branch"]["of"]
+            if root in seen:
+                break
+            seen.add(root)
+        fam, stack = [root], [root]
+        while stack:
+            cur = stack.pop()
+            for nid, n in self.nodes.items():
+                if (n.get("branch") or {}).get("of") == cur and nid not in fam:
+                    fam.append(nid)
+                    stack.append(nid)
+        return fam
+
+    def branch(self, source_id: str, label: str, path: str | None = None, mode: str | None = None,
+               params: dict | None = None, why: str = "", name: str | None = None,
+               actor: str = "user") -> dict:
+        src = self.node(source_id)
+        if not why:
+            raise SciWeaveError("a branch needs a reason: say why this alternative exists (--why)")
+        node = self.add_node(src["type"], label, path=path, mode=mode or src["mode"],
+                             description=src.get("description", ""), groups=src["groups"], tags=src["tags"],
+                             actor=actor, message=f"branch of {source_id}", step=src.get("step"))
+        node["branch"] = {"of": source_id, "name": name or label, "why": why, "status": "alternative",
+                          "created": now_iso()}
+        src.setdefault("branch", {"of": None, "name": "original", "why": "", "status": "main",
+                                  "created": now_iso()})
+        params = params or {}
+        prov = [e for e in self.incoming(source_id) if e["rel"] not in SOFT_RELS and e["rel"] != "part_of"]
+        carriers = [e for e in prov if set(params) & set(e.get("params", {}))] or \
+                   [e for e in prov if e["rel"] in ("produces", "derives")][:1]
+        for e in prov:
+            p = dict(e.get("params", {}))
+            if e in carriers:
+                p.update(params)
+            if e["rel"] == "code":
+                if not self.find_edge(e["source"], node["id"]):
+                    self.link(e["source"], node["id"], rel="code", actor=actor)
+                continue
+            self.link(e["source"], node["id"], rel=e["rel"], params=p, script=e.get("script"),
+                      command=e.get("command"), actor=actor)
+        self.link(source_id, node["id"], rel="variant", label=name or label, note=why, actor=actor)
+        if node["versions"]:
+            node["versions"][-1]["why"] = why
+            node["versions"][-1]["changes"] = [
+                {"kind": "param", "edge": None, "source": None, "key": k,
+                 "from": next((e["params"].get(k) for e in carriers if k in e.get("params", {})), None), "to": v}
+                for k, v in params.items()]
+        self.log("branch_created", node=node["id"], detail=f"branch of {source_id}: {why}", actor=actor,
+                 nodes=[source_id, node["id"]], params=params or None)
+        return node
+
+    def set_branch_status(self, node_id: str, status: str, why: str = "", actor: str = "user") -> None:
+        if status not in BRANCH_STATUSES:
+            raise SciWeaveError(f"status must be one of {BRANCH_STATUSES}")
+        n = self.node(node_id)
+        fam = self.branch_family(node_id)
+        if len(fam) < 2 and not n.get("branch"):
+            raise SciWeaveError(f"{node_id} has no branches")
+        if status == "main":
+            for other in fam:
+                b = self.nodes[other].setdefault("branch", {"of": None, "name": "original", "why": "",
+                                                            "status": "main", "created": now_iso()})
+                if other != node_id and b.get("status") == "main":
+                    b["status"] = "alternative"
+        n.setdefault("branch", {"of": None, "name": "original", "why": "", "created": now_iso()})["status"] = status
+        n["branch"]["decision"] = {"ts": now_iso(), "why": why, "actor": actor, "status": status}
+        self.log("branch_status", node=node_id, detail=f"{status}: {why}" if why else status, actor=actor,
+                 nodes=fam, why=why or None)
 
     # ------------------------------------------------------ notes/groups ----
     def add_note(self, node_id: str, text: str, actor: str = "user") -> dict:
@@ -652,8 +843,10 @@ class Project:
         for pid in self.effective_parents(node_id):
             rec.setdefault(pid, self.nodes[pid]["current_version"])
         for e in self.incoming(node_id):
-            if e.get("params"):
-                latest.setdefault("edge_params", {})[e["id"]] = e["params"]
+            # only links that did not exist when this version was made; an existing link's
+            # snapshot must keep the old values, or parameter changes become invisible
+            if e.get("params") and e["id"] not in latest.setdefault("edge_params", {}):
+                latest["edge_params"][e["id"]] = dict(e["params"])
 
     def edge_is_stale(self, e: dict) -> bool:
         src, tgt = self.nodes.get(e["source"]), self.nodes.get(e["target"])
@@ -779,6 +972,7 @@ class Project:
             "nodes": list(self.nodes.values()),
             "edges": edges,
             "groups": self.graph["groups"],
+            "steps": self.steps,
             "status": st,
             "types": NODE_TYPES,
             "relations": EDGE_RELATIONS,

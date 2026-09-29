@@ -69,6 +69,27 @@ def preview(p: Project, node_id: str, version: int | None = None, rows: int = 25
     return {"kind": "none", "reason": f"no preview for {ext or 'this file'}"}
 
 
+def latest_suggestions(p: Project) -> dict:
+    """Last monitor round (written by `sciweave monitor`, the Claude skill or the dashboard),
+    re-filtered against the current graph so items already handled disappear."""
+    from sciweave import monitor
+    f = p.state / "monitor_latest.json"
+    st = monitor.load_state(p)
+    if not f.exists():
+        return {"ts": None, "updated": [], "new": [], "missing": [], "stale": [], "last_round": st.get("last_round")}
+    r = json.loads(f.read_text(encoding="utf-8"))
+    status = p.status()
+    tracked = {n["path"] for n in p.nodes.values() if n["path"]}
+    r["updated"] = [u for u in r.get("updated", []) if u["node"] in status and status[u["node"]]["modified"]]
+    r["missing"] = [m for m in r.get("missing", []) if m["node"] in status and status[m["node"]]["missing"]]
+    ign = monitor.DEFAULT_IGNORE + st.get("ignore", [])
+    r["new"] = [n for n in r.get("new", []) if n["path"] not in tracked and not monitor._ignored(n["path"], ign)]
+    r["stale"] = [{"node": k, "label": p.nodes[k]["label"], "reasons": v["reasons"][:3]}
+                  for k, v in status.items() if v["stale"]]
+    r["last_round"] = st.get("last_round")
+    return r
+
+
 class Handler(BaseHTTPRequestHandler):
     project_root: Path = Path(".")
     lock = threading.Lock()
@@ -101,6 +122,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self._project().payload())
             if url.path == "/api/preview":
                 return self._json(preview(self._project(), q["node"], int(q["version"]) if q.get("version") else None))
+            if url.path == "/api/suggest":
+                return self._json(latest_suggestions(self._project()))
             if url.path == "/api/article":
                 return self._json(article_summary(self._project(), q["id"]))
             if url.path == "/api/file":
@@ -137,7 +160,8 @@ class Handler(BaseHTTPRequestHandler):
                 if url.path == "/api/ask":
                     return self._json(ai.ask(p, body.get("question", ""), engine=body.get("engine", "auto")))
                 if url.path == "/api/save":
-                    v = p.save_version(body["node"], message=body.get("message", "saved from dashboard"))
+                    v = p.save_version(body["node"], message=body.get("message", "saved from dashboard"),
+                                       why=body.get("why", ""))
                     p.commit()
                     return self._json({"ok": True, "version": v["v"] if v else None,
                                        "message": f"saved v{v['v']}" if v else "unchanged — nothing to save"})
@@ -153,6 +177,22 @@ class Handler(BaseHTTPRequestHandler):
                     p.set_group(body["name"], body.get("nodes", []), color=body.get("color"))
                     p.commit()
                     return self._json({"ok": True, "message": f"group {body['name']} updated"})
+                if url.path == "/api/suggest":
+                    from sciweave import monitor
+                    r = monitor.run_round(p)
+                    p.commit()
+                    return self._json({**r, "ok": True, "text": monitor.render(p, r)})
+                if url.path == "/api/ignore":
+                    from sciweave import monitor
+                    st = monitor.load_state(p)
+                    if body["pattern"] not in st["ignore"]:
+                        st["ignore"].append(body["pattern"])
+                    monitor.save_state(p, st)
+                    return self._json({"ok": True, "message": f"ignoring {body['pattern']}"})
+                if url.path == "/api/branch":
+                    p.set_branch_status(body["node"], body["status"], why=body.get("why", ""))
+                    p.commit()
+                    return self._json({"ok": True, "message": f"{body['node']} is now {body['status']}"})
                 if url.path == "/api/restore":
                     t = p.restore(body["node"], int(body["version"]), force=bool(body.get("force")))
                     p.commit()

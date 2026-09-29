@@ -19,11 +19,12 @@
   var state = {
     page: 'network',
     view: load('view', 'force'),
-    groupBy: load('groupBy', 'category'),
+    groupBy: load('groupBy', null),
     showRefs: load('showRefs', true),
     showCode: load('showCode', true),
     showParams: load('showParams', false),
     showLegend: load('showLegend', true),
+    hiddenTypes: load('hiddenTypes', []),
     selected: null,
     selectedEdge: null,
     search: '',
@@ -48,6 +49,11 @@
     note: 'M4 4h16v11l-5 5H4zM15 20v-5h5'
   };
 
+  var BRANCH_ICON = 'M6 3v12M18 3a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM6 15a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM18 9c0 5-6 4-9.5 7.5';
+  function branchSvg(size, col) {
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" style="vertical-align:-3px"><path d="' + BRANCH_ICON +
+      '" fill="none" stroke="' + col + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
   function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
   function catOf(n) { return (DATA.types[n.type] || {}).category || 'notes'; }
   function catColor(cat) { return cssVar('--cat-' + cat) || '#888'; }
@@ -87,7 +93,7 @@
     while (stack.length) {
       var cur = stack.pop();
       (dir === 'up' ? inEdges[cur] : outEdges[cur]).forEach(function (e) {
-        if (e.rel === 'documents' || e.rel === 'related') return;
+        if (e.rel === 'documents' || e.rel === 'related' || e.rel === 'variant') return;
         var nxt = dir === 'up' ? e.source : e.target;
         if (!seen[nxt]) { seen[nxt] = true; out.push(nxt); stack.push(nxt); }
       });
@@ -106,16 +112,39 @@
     switch (state.groupBy) {
       case 'type': return n.type;
       case 'group': return n.groups[0] || '(ungrouped)';
+      case 'step': return n.step && (DATA.steps || {})[n.step] ? n.step : '(no step)';
       case 'article': return articleOf(n);
       case 'state': return st(n.id).state;
+      case 'recency': return recencyOf(n);
       default: return catOf(n);
     }
+  }
+
+  function ageDays(ts) { return ts ? (Date.now() - new Date(ts).getTime()) / 864e5 : 1e9; }
+  function recencyOf(n) {
+    var d = ageDays(n.updated);
+    return d < 1 ? 'updated today' : d < 7 ? 'this week' : d < 31 ? 'this month' : 'older';
+  }
+
+  function stepOrder(key) { var s = (DATA.steps || {})[key]; return s ? (s.order || 0) : 1e6; }
+  function stepLabel(key) {
+    var s = (DATA.steps || {})[key];
+    return s ? s.order + '. ' + s.label : 'no step yet';
+  }
+  function groupLabel(key) { return state.groupBy === 'step' ? stepLabel(key) : key; }
+  function sortGroups(keys) {
+    if (state.groupBy === 'step') return keys.sort(function (a, b) { return stepOrder(a) - stepOrder(b) || d3.ascending(a, b); });
+    var FLOW = ['sources', 'process', 'outputs', 'writing', 'notes', 'updated today', 'this week', 'this month', 'older'];
+    return keys.sort(function (a, b) {
+      var ia = FLOW.indexOf(a), ib = FLOW.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || d3.ascending(a, b);
+    });
   }
 
   function isHiddenRef(n) { return !state.showRefs && n.mode === 'ref' && catOf(n) === 'outputs'; }
 
   function visible() {
-    var nodes = DATA.nodes.filter(function (n) { return !isHiddenRef(n); });
+    var nodes = DATA.nodes.filter(function (n) { return !isHiddenRef(n) && state.hiddenTypes.indexOf(n.type) < 0; });
     var ok = {}; nodes.forEach(function (n) { ok[n.id] = true; });
     var edges = DATA.edges.filter(function (e) {
       return ok[e.source] && ok[e.target] && (state.showCode || e.rel !== 'code');
@@ -142,7 +171,11 @@
       (n.description ? '<div class="s">' + esc(trunc(n.description, 160)) + '</div>' : '');
   }
   function edgeTip(e) {
-    var html = '<div class="t">' + esc(e.source) + ' → ' + esc(e.target) + '</div><div class="s">' + esc(e.rel) +
+    if (e.rel === 'variant') return '<div class="t">' + esc(e.target) + ' is a branch of ' + esc(e.source) + '</div><div class="s">' +
+      esc(e.label || '') + '</div>' + (e.note ? '<div class="s why">why: ' + esc(e.note) + '</div>' : '');
+    var sa = (byId[e.source] || {}).step, sb = (byId[e.target] || {}).step;
+    var stepLine = sa !== sb && (sa || sb) ? '<div class="s">between steps: ' + esc(stepLabel(sa)) + ' \u2192 ' + esc(stepLabel(sb)) + '</div>' : '';
+    var html = '<div class="t">' + esc(e.source) + ' \u2192 ' + esc(e.target) + '</div>' + stepLine + '<div class="s">' + esc(e.rel) +
       (e.label ? ' as “' + esc(e.label) + '”' : '') + (e.stale ? ' · stale' : '') + '</div>';
     if (hasParams(e)) html += '<table class="params-table">' + Object.keys(e.params).map(function (k) {
       return '<tr><td>' + esc(k) + '</td><td>' + esc(e.params[k]) + '</td></tr>'; }).join('') + '</table>';
@@ -166,9 +199,10 @@
   }
 
   function edgeClass(e) {
+    if (e.rel === 'variant') return 'edge variant';
     return 'edge ' + (hasParams(e) ? 'params' : 'plain') + (e.rel === 'code' ? ' code' : '') + (e.stale ? ' stale' : '');
   }
-  function marker(e, kind) { return 'url(#arrow-' + (hasParams(e) ? 'params' : 'plain') + '-' + kind + ')'; }
+  function marker(e, kind) { if (e.rel === 'variant') return null; return 'url(#arrow-' + (hasParams(e) ? 'params' : 'plain') + '-' + kind + ')'; }
 
   function drawNodes(layer, nodes) {
     var g = layer.selectAll('g.node-g').data(nodes, function (d) { return d.id; }).join('g')
@@ -184,6 +218,15 @@
       el.append('path').attr('class', 'icon').attr('d', ICONS[d.type] || ICONS.result)
         .attr('transform', 'translate(' + (-12 * k) + ',' + (-12 * k) + ') scale(' + k + ')')
         .attr('vector-effect', 'non-scaling-stroke').style('stroke', iconInk(fill));
+      var b = d.branch || null;
+      if (b && b.status === 'abandoned') el.classed('abandoned', true);
+      if (b && b.status !== 'main') {
+        var bg = el.append('g').attr('transform', 'translate(' + (-r * 0.95) + ',' + (r * 0.55) + ')');
+        bg.append('circle').attr('r', 7.5).attr('fill', cssVar('--surface')).attr('stroke', cssVar('--text-2')).attr('stroke-width', 1.2);
+        bg.append('path').attr('d', BRANCH_ICON).attr('transform', 'translate(-5,-5) scale(0.42)').attr('fill', 'none')
+          .attr('stroke', cssVar('--text-2')).attr('stroke-width', 2.6).attr('stroke-linecap', 'round');
+      }
+      if (ageDays(d.updated) < 1) el.append('circle').attr('class', 'recent-dot').attr('r', 4.5).attr('cx', -r * 0.74).attr('cy', -r * 0.74);
       if (d.final_version) el.append('text').attr('class', 'star').attr('x', r * 0.55).attr('y', -r * 0.55)
         .attr('font-size', 13).attr('fill', cssVar('--final')).text('★');
     });
@@ -257,11 +300,8 @@
     var nodes = v.nodes.map(function (n) { return { id: n.id, n: n, group: groupKey(n) }; });
     var idx = {}; nodes.forEach(function (d) { idx[d.id] = d; });
     var links = v.edges.map(function (e) { return { e: e, source: e.source, target: e.target }; });
-    var FLOW = ['sources', 'process', 'outputs', 'writing', 'notes'];
-    var groups = Array.from(new Set(nodes.map(function (d) { return d.group; }))).sort(function (a, b) {
-      var ia = FLOW.indexOf(a), ib = FLOW.indexOf(b);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || d3.ascending(a, b);
-    });
+    var groups = sortGroups(Array.from(new Set(nodes.map(function (d) { return d.group; }))));
+    var stepMode = state.groupBy === 'step';
     var gColor = {};
     groups.forEach(function (gname) { gColor[gname] = haloColor(gname); });
 
@@ -271,15 +311,60 @@
     // every group gets an anchor on a ring; nodes start at (and are pulled to) their anchor,
     // so halos separate instead of piling up in the middle
     var ringR = groups.length > 1 ? Math.max(170, Math.sqrt(nodes.length) * 48) : 0;
-    var anchor = {};
-    groups.forEach(function (gname, i) {
-      var a = (i / Math.max(1, groups.length)) * 2 * Math.PI - Math.PI / 2;
-      anchor[gname] = [ctx.w / 2 + Math.cos(a) * ringR, ctx.h / 2 + Math.sin(a) * ringR];
-    });
+    var anchor = {}, stepR = {};
+    if (stepMode) {
+      // steps in analysis order, read like text: left -> right, then the next row (serpentine),
+      // each cell sized for its largest step so the ovals never overlap
+      // each step gets a disc sized to its object count; discs are packed in rows in step
+      // order (serpentine), and a containment force keeps objects inside their own disc
+      var size = {};
+      nodes.forEach(function (d) { size[d.group] = (size[d.group] || 0) + 1; });
+      groups.forEach(function (g) { stepR[g] = 70 + 46 * Math.sqrt(size[g]); });
+      var GAP = 90;
+      var targetW = Math.max(1100, Math.sqrt(d3.sum(groups, function (g) { return 4 * stepR[g] * stepR[g]; })) * 1.75);
+      var rowsL = [], cur = [], wsum = 0;
+      groups.forEach(function (g) {
+        var gw = 2 * stepR[g] + GAP;
+        if (cur.length && wsum + gw > targetW) { rowsL.push(cur); cur = []; wsum = 0; }
+        cur.push(g); wsum += gw;
+      });
+      if (cur.length) rowsL.push(cur);
+      var y = 0, rowY = [];
+      rowsL.forEach(function (row) { var h = d3.max(row, function (g) { return 2 * stepR[g]; }); rowY.push(y + h / 2); y += h + GAP; });
+      var totalH = y - GAP;
+      rowsL.forEach(function (row, ri) {
+        var ordered = ri % 2 ? row.slice().reverse() : row;
+        var rw = d3.sum(ordered, function (g) { return 2 * stepR[g]; }) + GAP * (ordered.length - 1);
+        var x = ctx.w / 2 - rw / 2;
+        ordered.forEach(function (g) {
+          anchor[g] = [x + stepR[g], ctx.h / 2 - totalH / 2 + rowY[ri]];
+          x += 2 * stepR[g] + GAP;
+        });
+      });
+    } else {
+      groups.forEach(function (gname, i) {
+        var a = (i / Math.max(1, groups.length)) * 2 * Math.PI - Math.PI / 2;
+        anchor[gname] = [ctx.w / 2 + Math.cos(a) * ringR, ctx.h / 2 + Math.sin(a) * ringR];
+      });
+    }
+    var seen = {};
     nodes.forEach(function (d, i) {
       var an = anchor[d.group];
-      d.x = an[0] + Math.cos(i * 2.4) * 30; d.y = an[1] + Math.sin(i * 2.4) * 30;
+      if (stepMode) {  // sunflower seeding inside the step's disc
+        var j = seen[d.group] = (seen[d.group] || 0) + 1, rr = Math.sqrt(j / (1 + (nodes.length))) * stepR[d.group] * 0.9;
+        d.x = an[0] + Math.cos(j * 2.39996) * Math.min(rr * 3, stepR[d.group] * 0.8);
+        d.y = an[1] + Math.sin(j * 2.39996) * Math.min(rr * 3, stepR[d.group] * 0.8);
+      } else { d.x = an[0] + Math.cos(i * 2.4) * 30; d.y = an[1] + Math.sin(i * 2.4) * 30; }
     });
+    // keep each object inside its step's disc (hard boundary, so ovals never overlap)
+    function containForce() {
+      if (!stepMode) return;
+      nodes.forEach(function (d) {
+        var a = anchor[d.group], dx = d.x - a[0], dy = d.y - a[1], dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        var lim = stepR[d.group] - radius(d.n) - 28;
+        if (dist > lim) { var k = (dist - lim) / dist; d.x -= dx * k; d.y -= dy * k; d.vx *= 0.5; d.vy *= 0.5; }
+      });
+    }
 
     function clusterForce(strength) {
       var ns;
@@ -297,12 +382,14 @@
         .strength(function (l) { return l.source.group === l.target.group ? 0.4 : 0.04; }))
       .force('charge', d3.forceManyBody().strength(-300).distanceMax(420))
       .force('collide', d3.forceCollide().radius(function (d) { return radius(d.n) + 26; }).strength(0.9))
-      .force('x', d3.forceX(function (d) { return anchor[d.group][0]; }).strength(0.07))
-      .force('y', d3.forceY(function (d) { return anchor[d.group][1]; }).strength(0.07))
-      .force('cluster', clusterForce(0.25));
+      .force('x', d3.forceX(function (d) { return anchor[d.group][0]; }).strength(stepMode ? 0.16 : 0.07))
+      .force('y', d3.forceY(function (d) { return anchor[d.group][1]; }).strength(stepMode ? 0.16 : 0.07))
+      .force('cluster', clusterForce(0.25))
+      .force('contain', containForce);
 
+    function crossing(l) { return l.source.group !== l.target.group; }
     var linkSel = linkLayer.selectAll('path.edge').data(links).join('path')
-      .attr('class', function (l) { return edgeClass(l.e); }).attr('marker-end', function (l) { return marker(l.e, 'tip'); });
+      .attr('class', function (l) { return edgeClass(l.e) + (stepMode && crossing(l) ? ' cross' : ''); }).attr('marker-end', function (l) { return marker(l.e, 'tip'); });
     var hitSel = linkLayer.selectAll('path.edge-hit').data(links).join('path').attr('class', 'edge-hit')
       .datum(function (l) { return l; });
     hitSel.on('mouseenter', function (evt, l) { showTip(evt, edgeTip(l.e)); })
@@ -321,7 +408,14 @@
       var sx = l.source.x, sy = l.source.y, tx = l.target.x, ty = l.target.y;
       var dx = tx - sx, dy = ty - sy, len = Math.sqrt(dx * dx + dy * dy) || 1;
       var rs = radius(l.source.n) + 2, rt = radius(l.target.n) + 5;
-      return 'M' + (sx + dx / len * rs) + ',' + (sy + dy / len * rs) + 'L' + (tx - dx / len * rt) + ',' + (ty - dy / len * rt);
+      var x1 = sx + dx / len * rs, y1 = sy + dy / len * rs, x2 = tx - dx / len * rt, y2 = ty - dy / len * rt;
+      if (stepMode && crossing(l)) {
+        // links between steps arc across the gap; links within a step stay straight
+        var bend = Math.min(90, len * 0.2);
+        var mx = (x1 + x2) / 2 - dy / len * bend, my = (y1 + y2) / 2 + dx / len * bend;
+        return 'M' + x1 + ',' + y1 + 'Q' + mx + ',' + my + ' ' + x2 + ',' + y2;
+      }
+      return 'M' + x1 + ',' + y1 + 'L' + x2 + ',' + y2;
     }
     var lineGen = d3.line().curve(d3.curveCatmullRomClosed.alpha(0.7));
     function hull(points, pad) {
@@ -339,6 +433,29 @@
       var by = {};
       nodes.forEach(function (d) { (by[d.group] = by[d.group] || []).push([d.x, d.y]); });
       var hulls = groups.filter(function (k) { return by[k]; }).map(function (k) { return { k: k, pts: hull(by[k], 46) }; });
+      if (stepMode) {
+        // one oval per step, fitted around its objects
+        var ovals = groups.filter(function (k) { return by[k]; }).map(function (k) {
+          var pts = by[k], cx = d3.mean(pts, function (p) { return p[0]; }), cy = d3.mean(pts, function (p) { return p[1]; });
+          var rx = Math.max(95, d3.max(pts, function (p) { return Math.abs(p[0] - cx); }) + 70);
+          var ry = Math.max(70, d3.max(pts, function (p) { return Math.abs(p[1] - cy); }) + 62);
+          return { k: k, cx: cx, cy: cy, rx: rx, ry: ry };
+        });
+        hullLayer.selectAll('ellipse').data(ovals, function (d) { return d.k; }).join('ellipse').attr('class', 'step-oval')
+          .attr('cx', function (d) { return d.cx; }).attr('cy', function (d) { return d.cy; })
+          .attr('rx', function (d) { return d.rx; }).attr('ry', function (d) { return d.ry; })
+          .attr('fill', function (d) { return gColor[d.k]; }).attr('fill-opacity', cssVar('--halo-opacity'))
+          .attr('stroke', function (d) { return gColor[d.k]; }).attr('stroke-opacity', 0.5).attr('stroke-width', 1.4)
+          .on('click', function (evt, d) { evt.stopPropagation(); showStep(d.k); });
+        labelLayer.selectAll('text').data(ovals, function (d) { return d.k; }).join('text').attr('class', 'halo-label step-label')
+          .attr('text-anchor', 'middle').attr('x', function (d) { return d.cx; }).attr('y', function (d) { return d.cy - d.ry - 8; })
+          .text(function (d) { return stepLabel(d.k); })
+          .on('click', function (evt, d) { evt.stopPropagation(); showStep(d.k); });
+        paramBadges(badgeLayer, v.edges, function (e) {
+          var s = idx[e.source], t = idx[e.target]; return [(s.x + t.x) / 2, (s.y + t.y) / 2];
+        });
+        return;
+      }
       hullLayer.selectAll('path').data(hulls, function (d) { return d.k; }).join('path')
         .attr('d', function (d) { return lineGen(d.pts); })
         .attr('fill', function (d) { return gColor[d.k]; }).attr('fill-opacity', cssVar('--halo-opacity'))
@@ -347,7 +464,7 @@
         .attr('text-anchor', 'middle')
         .attr('x', function (d) { return d3.mean(d.pts, function (p) { return p[0]; }); })
         .attr('y', function (d) { return d3.min(d.pts, function (p) { return p[1]; }) - 6; })
-        .text(function (d) { return d.k; });
+        .text(function (d) { return groupLabel(d.k); });
       paramBadges(badgeLayer, v.edges, function (e) {
         var s = idx[e.source], t = idx[e.target]; return [(s.x + t.x) / 2, (s.y + t.y) / 2];
       });
@@ -363,8 +480,13 @@
     return function () { sim.stop(); };
   }
 
+  var STEP_TINTS = ['--cat-sources', '--cat-process', '--cat-outputs'];
   function haloColor(key) {
     if (state.groupBy === 'category') return catColor(key);
+    if (state.groupBy === 'step') {
+      // three validated hues cycled by order (+ label and order number carry identity), grey for "no step"
+      return (DATA.steps || {})[key] ? cssVar(STEP_TINTS[(stepOrder(key) - 1) % 3 < 0 ? 0 : (stepOrder(key) - 1) % 3]) : cssVar('--text-3');
+    }
     if (state.groupBy === 'type' && DATA.types[key]) return catColor(DATA.types[key].category);
     if (state.groupBy === 'state') return { stale: cssVar('--stale'), missing: cssVar('--edge-params'), modified: cssVar('--text-3') }[key] || cssVar('--cat-outputs');
     var g = DATA.groups[key];
@@ -378,7 +500,7 @@
     var v = visible(), ctx = makeSvg();
     var groups = {};
     v.nodes.forEach(function (n) { var k = groupKey(n); (groups[k] = groups[k] || []).push(n); });
-    var rootData = { id: '__root', name: DATA.project.name, children: Object.keys(groups).sort().map(function (k) {
+    var rootData = { id: '__root', name: DATA.project.name, children: sortGroups(Object.keys(groups)).map(function (k) {
       return { id: '__g_' + k, name: k, children: groups[k].sort(function (a, b) { return d3.ascending(a.id, b.id); }).map(function (n) { return { id: n.id, node: n }; }) };
     }) };
     var root = d3.hierarchy(rootData);
@@ -525,7 +647,9 @@
     applyHighlight();
     renderLegend();
     var stale = DATA.nodes.filter(function (n) { return st(n.id).stale; }).length;
-    document.getElementById('counts').textContent = DATA.nodes.length + ' nodes · ' + DATA.edges.length + ' links' + (stale ? ' · ' + stale + ' stale' : '');
+    var hiddenN = DATA.nodes.filter(function (n) { return state.hiddenTypes.indexOf(n.type) >= 0; }).length;
+    document.getElementById('counts').textContent = DATA.nodes.length + ' nodes · ' + DATA.edges.length + ' links' + (stale ? ' · ' + stale + ' stale' : '') +
+      (hiddenN ? ' · ' + hiddenN + ' hidden' : '');
   }
 
   // ------------------------------------------------------- highlighting ----
@@ -569,18 +693,28 @@
     var el = document.getElementById('legend');
     el.classList.toggle('hidden', !state.showLegend || state.page !== 'network');
     var types = Object.keys(DATA.types);
-    var html = '<h4>Node types</h4><div class="grid">';
+    var count = {};
+    DATA.nodes.forEach(function (n) { count[n.type] = (count[n.type] || 0) + 1; });
+    var hidden = state.hiddenTypes.filter(function (t) { return count[t]; });
+    var html = '<h4>Node types <span class="legend-hint">· click to hide / show</span>' +
+      (hidden.length ? ' <a class="nid legend-showall" data-showall="1">show all</a>' : '') + '</h4><div class="grid">';
     types.forEach(function (t) {
       var fill = catColor(DATA.types[t].category);
-      html += '<div class="row"><svg width="18" height="18" viewBox="-9 -9 18 18"><circle r="8.5" fill="' + fill + '"/>' +
+      var off = state.hiddenTypes.indexOf(t) >= 0;
+      html += '<div class="row type-toggle' + (off ? ' off' : '') + (count[t] ? '' : ' empty') + '" data-type="' + esc(t) + '" role="button" tabindex="0" ' +
+        'aria-pressed="' + (!off) + '" title="' + (off ? 'Show ' : 'Hide ') + esc(t) + ' nodes">' +
+        '<svg width="18" height="18" viewBox="-9 -9 18 18"><circle r="8.5" fill="' + fill + '"/>' +
         '<path d="' + ICONS[t] + '" transform="translate(-5.5,-5.5) scale(0.46)" fill="none" stroke="' + iconInk(fill) + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
-        esc(t) + ' <span class="muted">' + esc(DATA.types[t].prefix) + '</span></div>';
+        '<span class="tname">' + esc(t) + '</span> <span class="muted">' + esc(DATA.types[t].prefix) + (count[t] ? ' · ' + count[t] : '') + '</span></div>';
     });
     html += '</div><h4>Links &amp; state</h4><div class="grid">' +
       '<div class="row"><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + cssVar('--edge-params') + '" stroke-width="2"/></svg>has parameters</div>' +
       '<div class="row"><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + cssVar('--edge-plain') + '" stroke-width="2"/></svg>no parameters</div>' +
       '<div class="row"><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + cssVar('--text-3') + '" stroke-width="2" stroke-dasharray="5 3"/></svg>stale link</div>' +
       '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none" stroke="' + cssVar('--stale') + '" stroke-width="2.5"/></svg>stale node</div>' +
+      '<div class="row"><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + cssVar('--text-2') + '" stroke-width="2.2" stroke-dasharray="0.5 5" stroke-linecap="round"/></svg>branch (variant of)</div>' +
+      '<div class="row">' + branchSvg(16, cssVar('--text-2')) + 'alternative branch</div>' +
+      '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="4.5" fill="' + cssVar('--accent') + '"/></svg>updated in the last 24 h</div>' +
       '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none" stroke="' + cssVar('--text-2') + '" stroke-width="1.5" stroke-dasharray="3 2"/></svg>modified on disk</div>' +
       '<div class="row"><span class="star" style="width:18px;text-align:center">★</span>has final version</div>' +
       '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="' + cssVar('--text-3') + '" fill-opacity="0.55" stroke="' + cssVar('--text-3') + '" stroke-dasharray="2 2"/></svg>reference (not copied)</div>' +
@@ -590,6 +724,7 @@
 
   // ------------------------------------------------------- side panel ----
   function select(id) {
+    state.showingSuggestions = false;
     state.selected = id; state.selectedEdge = null; state.askHighlight = null;
     try { history.replaceState(null, '', '#node=' + encodeURIComponent(id)); } catch (e) {}
     if (state.view === 'lineage') render(); else applyHighlight();
@@ -614,7 +749,7 @@
   function provTree(id, depth, seen) {
     if (depth > 7) return '';
     var html = '';
-    inEdges[id].filter(function (e) { return e.rel !== 'documents' && e.rel !== 'related'; }).sort(function (a, b) { return d3.ascending(a.rel === 'code', b.rel === 'code') || d3.ascending(a.source, b.source); })
+    inEdges[id].filter(function (e) { return e.rel !== 'documents' && e.rel !== 'related' && e.rel !== 'variant'; }).sort(function (a, b) { return d3.ascending(a.rel === 'code', b.rel === 'code') || d3.ascending(a.source, b.source); })
       .forEach(function (e) {
         var s = byId[e.source];
         html += '<div class="prov-item ' + (hasParams(e) ? 'params' : 'plain') + '" style="margin-left:' + (depth * 12) + 'px">' +
@@ -643,6 +778,7 @@
       '<h2>' + esc(n.id) + ' · ' + esc(n.label) + '</h2><button class="icon-btn close" id="panel-close" title="Close">✕</button></div>' +
       '<div class="chips"><span class="chip">' + esc(n.type) + '</span><span class="chip">' + esc(catOf(n)) + '</span><span class="chip">' + esc(n.mode) + '</span>' +
       '<span class="chip state-' + esc(s.state) + '">' + esc(s.state) + '</span>' +
+      (n.step ? '<span class="chip" data-step="' + esc(n.step) + '" style="cursor:pointer">step ' + esc(stepLabel(n.step)) + '</span>' : '') +
       (n.final_version ? '<span class="chip"><span class="star">★</span> final v' + n.final_version + '</span>' : '') +
       (n.groups || []).map(function (g) { return '<span class="chip">#' + esc(g) + '</span>'; }).join('') + '</div>';
     html += '<div class="actions">' +
@@ -656,6 +792,7 @@
     if (s.reasons && s.reasons.length) html += '<div class="sec"><h3>Attention</h3>' + s.reasons.map(function (r) { return '<div>' + esc(r) + '</div>'; }).join('') + '</div>';
     html += '<div class="sec"><h3>About</h3><div class="kv">' +
       (n.description ? '<div class="k">description</div><div class="v">' + esc(n.description) + '</div>' : '') +
+      (n.step ? '<div class="k">step</div><div class="v"><a class="nid" data-step="' + esc(n.step) + '">' + esc(stepLabel(n.step)) + '</a> <span class="muted">of ' + Object.keys(DATA.steps || {}).length + '</span></div>' : '<div class="k">step</div><div class="v muted">not assigned</div>') +
       '<div class="k">path</div><div class="v mono">' + esc(n.path || '—') + '</div>' +
       (n.meta && n.meta.origin ? '<div class="k">copied from</div><div class="v mono">' + esc(n.meta.origin) + '</div>' : '') +
       '<div class="k">created</div><div class="v">' + esc(when(n.created)) + '</div>' +
@@ -676,20 +813,8 @@
         esc(byId[e.target].label) + (e.label ? ' <span class="muted">as “' + esc(e.label) + '”</span>' : '') + (e.stale ? ' <span class="chip state-stale">stale</span>' : '') + '</div>';
     }).join('') : '<div class="muted">Nothing depends on it yet.</div>') + '</div>';
 
-    if (n.versions.length) {
-      html += '<div class="sec"><h3>Versions</h3><table class="versions"><tr><th>v</th><th>when</th><th>message</th><th></th></tr>' +
-        n.versions.slice().reverse().map(function (v) {
-          var acts = '';
-          if (v.stored) acts += '<a class="nid" data-vprev="' + v.v + '">view</a> ';
-          if (LIVE && v.v !== n.final_version) acts += '<a class="nid" data-vfinal="' + v.v + '">final</a> ';
-          if (LIVE && v.stored && v.v !== n.current_version) acts += '<a class="nid" data-vrestore="' + v.v + '">restore</a>';
-          var parents = Object.keys(v.parents || {}).map(function (k) { return k + '@v' + v.parents[k]; }).join(', ');
-          return '<tr><td>' + (v.v === n.final_version ? '<span class="star">★</span>' : '') + 'v' + v.v + '</td><td>' + esc(when(v.ts)) +
-            '<div class="muted">' + esc(v.actor || '') + '</div></td><td>' + esc(v.message || '') +
-            (parents ? '<div class="muted">from ' + esc(parents) + '</div>' : '') + (v.stored ? '' : '<div class="muted">fingerprint only</div>') +
-            '</td><td>' + acts + '</td></tr>';
-        }).join('') + '</table></div>';
-    }
+    html += renderBranches(n);
+    html += renderUpdates(n);
     html += '<div class="sec"><h3>Notes</h3>' + ((n.notes || []).length ? n.notes.slice().reverse().map(function (x) {
       return '<div class="note-item"><div class="when">' + esc(when(x.ts)) + ' · ' + esc(x.actor || 'user') + '</div>' + esc(x.text) + '</div>';
     }).join('') : '<div class="muted">No notes.</div>') + '</div>';
@@ -702,6 +827,125 @@
     panelEl.innerHTML = html;
     panelEl.classList.add('open');
     loadPreview(n, null);
+  }
+
+  function describeChange(c) {
+    switch (c.kind) {
+      case 'param': return { cls: 'param', text: c.key + ': ' + fmtVal(c.from) + ' \u2192 ' + fmtVal(c.to) + (c.source ? '  (' + c.source + ')' : '') };
+      case 'input': return { cls: 'input', text: 'input ' + c.node + ' v' + c.from + ' \u2192 v' + c.to };
+      case 'script': return { cls: 'input', text: 'script ' + c.node + ' v' + c.from + ' \u2192 v' + c.to };
+      case 'added_input': return { cls: 'input', text: '+ input ' + c.node };
+      case 'added_script': return { cls: 'input', text: '+ script ' + c.node };
+      case 'dropped_input': return { cls: 'input', text: '\u2212 input ' + c.node };
+      case 'content': return { cls: '', text: 'size ' + fmtSize(c.from) + ' \u2192 ' + fmtSize(c.to) };
+      default: return { cls: '', text: c.kind };
+    }
+  }
+  function fmtVal(v) { return v === undefined || v === null ? '\u2205' : Array.isArray(v) ? v.join(',') : String(v); }
+  function fmtSize(b) { return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b > 1024 ? (b / 1024).toFixed(1) + ' KB' : b + ' B'; }
+
+  // One timeline of how this item evolved: its versions (why + what changed) and
+  // parameter edits made on the links that feed it.
+  function renderUpdates(n) {
+    var items = [];
+    (n.versions || []).forEach(function (v) { items.push({ ts: v.ts, v: v }); });
+    inEdges[n.id].forEach(function (e) { (e.changes || []).forEach(function (c) { items.push({ ts: c.ts, e: e, c: c }); }); });
+    if (!items.length) return '';
+    items.sort(function (a, b) { return d3.descending(a.ts, b.ts); });
+    var html = '<div class="sec"><h3>Updates \u00b7 how and why it changed</h3>';
+    items.forEach(function (it) {
+      if (it.v) {
+        var v = it.v, acts = '';
+        if (v.stored) acts += '<a class="nid" data-vprev="' + v.v + '">view</a>';
+        if (LIVE && v.v !== n.final_version) acts += '<a class="nid" data-vfinal="' + v.v + '">final</a>';
+        if (LIVE && v.stored && v.v !== n.current_version) acts += '<a class="nid" data-vrestore="' + v.v + '">restore</a>';
+        html += '<div class="upd"><div class="upd-head">' + (v.v === n.final_version ? '<span class="star">\u2605</span>' : '') +
+          '<b>v' + v.v + '</b><span class="muted">' + esc(when(v.ts)) + '</span><span class="actor">' + esc(v.actor || 'user') + '</span>' +
+          (v.v === n.current_version ? '<span class="chip">current</span>' : '') + '<span class="acts">' + acts + '</span></div>';
+        if (v.why) html += '<div class="upd-why"><b>why</b>' + esc(v.why) + '</div>';
+        else if (v.v > 1 && v.actor !== 'import') html += '<div class="upd-why muted">no reason recorded</div>';
+        if (v.message) html += '<div class="upd-msg">' + esc(v.message) + '</div>';
+        var ch = (v.changes || []).map(describeChange);
+        if (ch.length) html += '<div>' + ch.map(function (c) { return '<span class="chg ' + c.cls + '">' + esc(c.text) + '</span>'; }).join('') + '</div>';
+        if (!v.stored) html += '<div class="muted" style="font-size:11.5px">fingerprint only (not restorable)</div>';
+        html += '</div>';
+      } else {
+        var diffs = Object.keys(it.c.params || {}).map(function (k) {
+          return '<span class="chg param">' + esc(k + ': ' + fmtVal(it.c.params[k][0]) + ' \u2192 ' + fmtVal(it.c.params[k][1])) + '</span>';
+        }).join('');
+        html += '<div class="upd param"><div class="upd-head"><b>parameters</b><span class="muted">' + esc(when(it.ts)) + '</span><span class="actor">' +
+          esc(it.c.actor || 'user') + '</span><span class="muted">on ' + nidLink(it.e.source) + ' \u2192 ' + esc(n.id) + '</span></div>' +
+          (it.c.why ? '<div class="upd-why"><b>why</b>' + esc(it.c.why) + '</div>' : '') + '<div>' + diffs + '</div>' +
+          '<div class="muted" style="font-size:11.5px">takes effect in the next version saved after the re-run</div></div>';
+      }
+    });
+    return html + '</div>';
+  }
+
+  function branchFamily(id) {
+    var root = id, guard = 0;
+    while (byId[root] && byId[root].branch && byId[root].branch.of && byId[byId[root].branch.of] && guard++ < 50) root = byId[root].branch.of;
+    var fam = [root], stack = [root];
+    while (stack.length) {
+      var cur = stack.pop();
+      DATA.nodes.forEach(function (x) { if (x.branch && x.branch.of === cur && fam.indexOf(x.id) < 0) { fam.push(x.id); stack.push(x.id); } });
+    }
+    return fam;
+  }
+  function renderBranches(n) {
+    var fam = branchFamily(n.id);
+    if (fam.length < 2) return '';
+    var html = '<div class="sec"><h3>Branches \u00b7 alternative versions of this analysis</h3>';
+    fam.forEach(function (id) {
+      var x = byId[id], b = x.branch || { status: 'main' };
+      var status = b.status || 'main';
+      html += '<div class="br"><span class="chip st-' + esc(status) + '">' + (status === 'main' ? '\u2713 main' : esc(status)) + '</span>' +
+        (id === n.id ? '<b>' + esc(id) + '</b>' : nidLink(id)) + ' <span>' + esc(trunc(x.label, 38)) + '</span>' +
+        (LIVE && status !== 'main' ? '<a class="nid" style="margin-left:auto" data-brmain="' + esc(id) + '">make main</a>' : '') +
+        (b.why ? '<div class="why" style="flex-basis:100%">why: ' + esc(b.why) + '</div>' : '') +
+        (b.decision && b.decision.why ? '<div class="muted" style="flex-basis:100%;font-size:12px">decided ' + esc(when(b.decision.ts)) + ': ' + esc(b.decision.why) + '</div>' : '') +
+        '</div>';
+    });
+    return html + '</div>';
+  }
+
+  // ---- a step: its objects, and its links within / from / to other steps
+  function showStep(key) {
+    state.showingSuggestions = false; state.selected = null; state.selectedEdge = null;
+    var members = DATA.nodes.filter(function (n) { return (n.step || '(no step)') === key || (key === '(no step)' && !(DATA.steps || {})[n.step]); });
+    var ids = {}; members.forEach(function (n) { ids[n.id] = true; });
+    state.askHighlight = ids;
+    applyHighlight();
+    var within = 0, inn = {}, out = {};
+    DATA.edges.forEach(function (e) {
+      var a = ids[e.source], b = ids[e.target];
+      if (a && b) within++;
+      else if (b) { var k1 = (byId[e.source] || {}).step || '(no step)'; inn[k1] = (inn[k1] || 0) + 1; }
+      else if (a) { var k2 = (byId[e.target] || {}).step || '(no step)'; out[k2] = (out[k2] || 0) + 1; }
+    });
+    var st = (DATA.steps || {})[key] || {};
+    var byType = {};
+    members.forEach(function (n) { (byType[n.type] = byType[n.type] || []).push(n); });
+    function flow(obj, arrow) {
+      var ks = Object.keys(obj).sort(function (a, b) { return stepOrder(a) - stepOrder(b); });
+      return ks.length ? '<div class="step-flow">' + ks.map(function (k) {
+        return '<span class="chip" data-step="' + esc(k) + '">' + (arrow === 'in' ? esc(stepLabel(k)) + ' →' : '→ ' + esc(stepLabel(k))) + ' · ' + obj[k] + '</span>';
+      }).join('') + '</div>' : '<div class="muted">none</div>';
+    }
+    var html = '<div class="head"><div class="title"><h2>' + esc(stepLabel(key)) + '</h2><button class="icon-btn close" id="panel-close">✕</button></div>' +
+      (st.description ? '<div class="muted" style="margin-top:6px">' + esc(st.description) + '</div>' : '') +
+      '<div class="chips"><span class="chip">' + members.length + ' objects</span><span class="chip">' + within + ' links within</span></div></div>';
+    html += '<div class="sec"><h3>Objects by type</h3>' + Object.keys(byType).sort().map(function (t) {
+      var fill = catColor(DATA.types[t].category);
+      return '<div style="margin-bottom:6px"><span class="type-count"><svg width="16" height="16" viewBox="-9 -9 18 18"><circle r="8.5" fill="' + fill + '"/><path d="' + ICONS[t] +
+        '" transform="translate(-5.5,-5.5) scale(0.46)" fill="none" stroke="' + iconInk(fill) + '" stroke-width="2.4" stroke-linecap="round"/></svg><b>' + esc(t) + '</b> ' + byType[t].length + '</span> ' +
+        byType[t].map(function (n) { return nidLink(n.id); }).join(' ') + '</div>';
+    }).join('') + '</div>';
+    html += '<div class="sec"><h3>Links in from other steps</h3>' + flow(inn, 'in') + '</div>';
+    html += '<div class="sec"><h3>Links out to other steps</h3>' + flow(out, 'out') + '</div>';
+    html += '<div class="sec muted" style="font-size:12.5px">The step’s objects are highlighted in the network; click empty space to clear.</div>';
+    panelEl.innerHTML = html;
+    panelEl.classList.add('open');
   }
 
   function renderEdgePanel() {
@@ -719,6 +963,11 @@
       '<div class="k">built from</div><div class="v">' + esc(e.source) + ' v' + esc(e.source_version) + ' (now v' + esc(byId[e.source].current_version) + ')</div>' +
       (e.note ? '<div class="k">note</div><div class="v">' + esc(e.note) + '</div>' : '') +
       '<div class="k">created</div><div class="v">' + esc(when(e.created)) + '</div></div></div>';
+    if ((e.changes || []).length) html += '<div class="sec"><h3>Parameter changes</h3>' + e.changes.slice().reverse().map(function (c) {
+      return '<div class="upd param"><div class="upd-head"><span class="muted">' + esc(when(c.ts)) + '</span><span class="actor">' + esc(c.actor || 'user') + '</span></div>' +
+        (c.why ? '<div class="upd-why"><b>why</b>' + esc(c.why) + '</div>' : '') + '<div>' + Object.keys(c.params).map(function (k) {
+          return '<span class="chg param">' + esc(k + ': ' + fmtVal(c.params[k][0]) + ' \u2192 ' + fmtVal(c.params[k][1])) + '</span>'; }).join('') + '</div></div>';
+    }).join('') + '</div>';
     html += '<div class="sec"><h3>Parameters</h3>' + (hasParams(e) ? '<table class="params-table">' + Object.keys(e.params).map(function (k) {
       return '<tr><td>' + esc(k) + '</td><td class="mono">' + esc(e.params[k]) + '</td></tr>'; }).join('') + '</table>' : '<div class="muted">None recorded (green link).</div>') + '</div>';
     panelEl.innerHTML = html;
@@ -768,10 +1017,27 @@
   }
 
   panelEl.addEventListener('click', function (evt) {
-    var t = evt.target.closest('[data-goto],[data-act],[data-vprev],[data-vfinal],[data-vrestore],#panel-close');
+    var stepEl = evt.target.closest('[data-step]');
+    if (stepEl) { showStep(stepEl.dataset.step); return; }
+    var t = evt.target.closest('[data-goto],[data-act],[data-vprev],[data-vfinal],[data-vrestore],[data-brmain],[data-sg],[data-sgsave],[data-sgcopy],[data-sgignore],#panel-close');
     if (!t) return;
     var n = byId[state.selected];
     if (t.id === 'panel-close') return clearSelection();
+    if (t.dataset.sg === 'round') { toast('running a round\u2026'); post('api/suggest', {}).then(function () { return refresh(true); })
+      .then(function () { loadSuggestions(true); }).catch(function (err) { toast('\u26a0 ' + err.message); }); return; }
+    if (t.dataset.sgsave) { saveWithWhy(t.dataset.sgsave, function () { loadSuggestions(true); }); return; }
+    if (t.dataset.sgcopy) {
+      var cmd = t.dataset.sgcopy;
+      (navigator.clipboard ? navigator.clipboard.writeText(cmd) : Promise.reject()).then(function () { toast('copied: ' + cmd); },
+        function () { prompt('Copy this command:', cmd); });
+      return;
+    }
+    if (t.dataset.sgignore) { post('api/ignore', { pattern: t.dataset.sgignore }).then(function (r) { toast(r.message); loadSuggestions(true); }); return; }
+    if (t.dataset.brmain) {
+      var why = prompt('Why is ' + t.dataset.brmain + ' now the main analysis?', '');
+      if (why !== null) act(post('api/branch', { node: t.dataset.brmain, status: 'main', why: why }));
+      return;
+    }
     if (t.dataset.goto) { goTo(t.dataset.goto); return; }
     if (t.dataset.vprev && n) return loadPreview(n, +t.dataset.vprev);
     if (t.dataset.vfinal && n) return act(post('api/final', { node: n.id, version: +t.dataset.vfinal }));
@@ -782,12 +1048,80 @@
     }
     if (!n) return;
     switch (t.dataset.act) {
-      case 'save': var m = prompt('Version message (what changed?)', ''); if (m !== null) act(post('api/save', { node: n.id, message: m })); break;
+      case 'save': saveWithWhy(n.id); break;
       case 'final': act(post('api/final', { node: n.id })); break;
       case 'note': var txt = prompt('Note for ' + n.id, ''); if (txt) act(post('api/note', { node: n.id, text: txt })); break;
       case 'lineage': setView('lineage'); break;
     }
   });
+
+  function saveWithWhy(id, after) {
+    var m = prompt('Save a new version of ' + id + '\n\nWhat changed? (short)', '');
+    if (m === null) return;
+    var why = prompt('Why was it updated? (kept with the version and shown in its history)', '');
+    if (why === null) return;
+    post('api/save', { node: id, message: m, why: why }).then(function (res) { toast(res.message || 'saved'); return refresh(true); })
+      .then(function () { if (after) after(); }).catch(function (err) { toast('\u26a0 ' + err.message); });
+  }
+
+  // ---- suggestions from the monitor (sciweave monitor / the Claude skill / "run a round now")
+  var SUGGEST = null;
+  function loadSuggestions(show) {
+    if (!LIVE) return;
+    fetch('api/suggest').then(function (r) { return r.json(); }).then(function (s) {
+      SUGGEST = s;
+      var n = (s.updated || []).length + (s.new || []).length + (s.missing || []).length;
+      var badge = document.getElementById('suggest-count');
+      badge.hidden = !n; badge.textContent = n > 99 ? '99+' : n;
+      if (show || state.showingSuggestions) renderSuggestions();
+    }).catch(function () {});
+  }
+  function guessLabel(path) {
+    return path.split('/').pop().replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+  }
+  function renderSuggestions() {
+    var s = SUGGEST || { updated: [], new: [], missing: [], stale: [] };
+    state.showingSuggestions = true; state.selected = null; state.selectedEdge = null;
+    var last = s.last_round ? when(s.last_round) + ' (' + Math.round(ageDays(s.last_round) * 1440) + ' min ago)' : 'never';
+    var html = '<div class="head"><div class="title"><h2>Suggestions</h2><button class="icon-btn close" id="panel-close">\u2715</button></div>' +
+      '<div class="muted" style="font-size:12.5px;margin-top:6px">last monitor round: ' + esc(last) + '</div>' +
+      '<div class="actions"><button class="btn primary" data-sg="round">Run a round now</button></div></div>';
+    function sec(title, items, fn) {
+      if (!items.length) return '';
+      return '<div class="sec"><h3>' + title + ' (' + items.length + ')</h3>' + items.slice(0, 60).map(fn).join('') + '</div>';
+    }
+    html += sec('Changed on disk \u00b7 save a new version, with a reason', s.updated || [], function (u) {
+      return '<div class="sg-item">' + nidLink(u.node) + ' ' + esc(u.label) + '<div class="sg-path muted">' + esc(u.path || '') + '</div>' +
+        '<div class="row2"><button class="btn" data-sgsave="' + esc(u.node) + '">Save new version\u2026</button></div></div>';
+    });
+    html += sec('New results \u00b7 not in the network yet', s.new || [], function (it) {
+      var hint = it.version_of ? 'looks like a new version of ' + nidLink(it.version_of) : it.near ? 'next to ' + nidLink(it.near) : '';
+      var cmd = it.version_of ? 'sciweave save ' + it.version_of + ' -m "' + it.path.split('/').pop() + '" --why "..."'
+        : 'sciweave add ' + it.type + ' "' + guessLabel(it.path) + '" "' + it.path + '"';
+      return '<div class="sg-item"><span class="chip">' + esc(it.type) + '</span> <span class="sg-path">' + esc(it.path) + '</span>' +
+        (hint ? '<div class="muted" style="font-size:12px">' + hint + '</div>' : '') +
+        '<div class="row2"><button class="btn" data-sgcopy="' + esc(cmd) + '">Copy command</button>' +
+        '<button class="btn" data-sgignore="' + esc(it.path) + '">Ignore</button></div></div>';
+    });
+    html += sec('Missing on disk', s.missing || [], function (m) {
+      return '<div class="sg-item">' + nidLink(m.node) + ' <span class="sg-path">' + esc(m.path) + '</span></div>';
+    });
+    html += sec('Stale \u00b7 regenerate when ready', s.stale || [], function (x) {
+      return '<div class="sg-item">' + nidLink(x.node) + ' ' + esc(x.label) + '<div class="muted" style="font-size:12px">' + esc((x.reasons || [])[0] || '') + '</div></div>';
+    });
+    if (!(s.updated || []).length && !(s.new || []).length && !(s.missing || []).length && !(s.stale || []).length)
+      html += '<div class="sec muted">Nothing to suggest. The network is up to date with the files on disk.</div>';
+    html += '<div class="sec muted" style="font-size:12.5px">In Claude Code say <b>\u201cadd the new results to SciWeave\u201d</b>: Claude turns these into an import plan and asks before applying. ' +
+      '<b>/sciweave-monitor</b> runs a round every hour; <code>sciweave monitor</code> does it in a terminal.</div>';
+    panelEl.innerHTML = html;
+    panelEl.classList.add('open');
+  }
+  document.getElementById('suggest-toggle').onclick = function () {
+    if (!LIVE) { toast('Suggestions need sciweave serve'); return; }
+    if (state.showingSuggestions && panelEl.classList.contains('open')) { state.showingSuggestions = false; panelEl.classList.remove('open'); return; }
+    if (state.page !== 'network') setPage('network');
+    loadSuggestions(true);
+  };
 
   function goTo(id) {
     if (!byId[id]) return;
@@ -858,7 +1192,8 @@
       var d = h.ts.slice(0, 10);
       if (d !== day) { day = d; html += '<div class="day">' + esc(d) + '</div>'; }
       html += '<div class="ev"><span class="t">' + esc(h.ts.slice(11, 16)) + '</span><span class="actor">' + esc(h.actor) + '</span><span>' +
-        esc(h.event.replace(/_/g, ' ')) + (h.node ? ' ' + nidLink(h.node) : '') + (h.detail ? ' <span class="muted">' + esc(trunc(h.detail, 140)) + '</span>' : '') + '</span></div>';
+        esc(h.event.replace(/_/g, ' ')) + (h.node ? ' ' + nidLink(h.node) : '') + (h.detail ? ' <span class="muted">' + esc(trunc(h.detail, 140)) + '</span>' : '') +
+        (h.why ? ' <span class="why">\u2014 why: ' + esc(trunc(h.why, 160)) + '</span>' : '') + '</span></div>';
     });
     el.innerHTML = html || '<div class="muted">No matching events.</div>';
   }
@@ -927,6 +1262,25 @@
     el.onchange = function () { state[p[1]] = el.checked; store(p[1], el.checked); if (p[1] === 'showLegend') renderLegend(); else render(); };
   });
   document.getElementById('fit-btn').onclick = function () { if (state.fitCurrent) state.fitCurrent(); };
+
+  // legend: click a node type to hide it from the network, click again to show it
+  function toggleType(t) {
+    var i = state.hiddenTypes.indexOf(t);
+    if (i >= 0) state.hiddenTypes.splice(i, 1); else state.hiddenTypes.push(t);
+    store('hiddenTypes', state.hiddenTypes);
+    state.forceFit = true;
+    render();
+  }
+  var legendEl = document.getElementById('legend');
+  legendEl.addEventListener('click', function (evt) {
+    if (evt.target.closest('[data-showall]')) { state.hiddenTypes = []; store('hiddenTypes', []); state.forceFit = true; render(); return; }
+    var row = evt.target.closest('.type-toggle');
+    if (row) toggleType(row.dataset.type);
+  });
+  legendEl.addEventListener('keydown', function (evt) {
+    var row = evt.target.closest && evt.target.closest('.type-toggle');
+    if (row && (evt.key === 'Enter' || evt.key === ' ')) { evt.preventDefault(); toggleType(row.dataset.type); }
+  });
   var searchEl = document.getElementById('search');
   searchEl.oninput = function () { state.search = searchEl.value; if (state.page !== 'network') setPage('network'); applyHighlight(); };
 
@@ -1000,6 +1354,7 @@
       sig = s; DATA = d; index();
       setPage(state.page);
       if (state.selected && byId[state.selected]) renderPanel();
+      loadSuggestions(false);
     });
   }
   function setLive(on) {
@@ -1019,11 +1374,13 @@
     var qs = {};
     location.search.replace(/^\?/, '').split('&').forEach(function (kv) { var p = kv.split('='); if (p[0]) qs[p[0]] = decodeURIComponent(p[1] || ''); });
     if (VIEWS[qs.view]) { state.view = qs.view; viewSel.value = qs.view; }
+    if (!state.groupBy) state.groupBy = Object.keys(DATA.steps || {}).length ? 'step' : 'category';
     if (qs.group) { state.groupBy = qs.group; grpSel.value = qs.group; }
+    grpSel.value = state.groupBy;
     if (qs.theme === 'dark' || qs.theme === 'light') document.documentElement.setAttribute('data-theme', qs.theme);
     setPage(['network', 'articles', 'history'].indexOf(qs.page) >= 0 ? qs.page : 'network');
     if (state.selected) renderPanel();
-    if (LIVE) setLive(liveOn);
+    if (LIVE) { setLive(liveOn); loadSuggestions(qs.panel === 'suggestions'); }
   }
   if (window.SCIWEAVE_DATA) boot(window.SCIWEAVE_DATA);
   else fetch('api/graph').then(function (r) { return r.json(); }).then(boot)

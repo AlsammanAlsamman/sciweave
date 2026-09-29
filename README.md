@@ -156,6 +156,44 @@ when something is worth keeping:
 The full protocol lives in [`SKILL.md`](sciweave/skills/sciweave/SKILL.md) and
 [`protocol.md`](sciweave/skills/sciweave/protocol.md).
 
+### 🔔 The hourly monitor
+
+Say **`sciweave monitor`** (or `/sciweave-monitor`) in Claude Code once. About every hour,
+SciWeave looks at the project for results that aren't in the network yet:
+- tracked files that changed on disk;
+- new tables and figures, with a hint such as *"looks like a new version of T1"* or *"next to F1"*;
+- missing files;
+- items made stale by an upstream change.
+
+The first round only takes a baseline, so you're never flooded with old files. After that:
+- A round with nothing new is **silent**.
+- A round with something new asks one short question: *"Shall I add these to SciWeave?"*
+- If a round lands while Claude is mid-task, it writes at most three lines and goes back to the task.
+- Nothing is saved, added or branched without your yes.
+
+The same round is available as `sciweave suggest`, as `sciweave monitor` in a terminal, and
+behind the 🔔 button in the dashboard.
+
+### 🧭 Updates you can follow: why, what changed, and branches
+
+Every new version carries a **why**, and SciWeave records **what changed** automatically:
+- parameters, old → new, and on which link;
+- which input or script moved to which version;
+- file size.
+
+Parameter edits on a link keep their own dated reason. When a re-run is an **alternative**
+rather than a replacement (a sensitivity analysis, another LD panel, another cohort set),
+make it a **branch**. The branch keeps the original's provenance with the overridden
+parameters, sits next to it behind a dotted *variant* link, and one member of the family is
+marked **main**, with the decision's reason kept. If it's unclear which applies, Claude asks:
+*replace, or keep both?*
+
+```bash
+sciweave save T2 -m "re-run" --why "covariates now include PC3"
+sciweave branch new T2 "Credible sets (L=5)" results/cs_L5.tsv -p L=5 --why "does the 2nd signal survive a smaller L?"
+sciweave branch main T3 --why "L=5 matches the number of independent signals"
+```
+
 <br>
 
 ## 📊 The dashboard
@@ -188,7 +226,9 @@ offline HTML file you can share.
 </table>
 
 - **Three views:** force network with halos · radial tree · lineage. **Group by** category, type,
-  custom group, article or status.
+  custom group, article, status or recency.
+- **Click a node type in the legend** to hide it from the network (scripts, notes…), and click again
+  to show it. The choice is remembered.
 - **Side panel:** preview (image, table head, text), how it was made (recursive, with
   parameters, script versions and commands), what uses it, versions (view, restore, mark final),
   notes and history. **Save version**, **Mark final** and **Add note** work live.
@@ -199,6 +239,14 @@ offline HTML file you can share.
 <br>
 
 ## 🧩 Concepts
+
+**Steps.** A project is organised into ordered analysis steps, for example
+`1 GWAS → 2 meta-analysis → 3 fine-mapping → … → 8 article writing`. Every object belongs
+to the step that produced it; the article's own numbered figures, tables and supplements belong
+to *article writing*. Grouped by step, the network draws each step as an oval, laid out in
+order. Links **within** a step stay straight, and links **between** steps arc across the
+gap. Click an oval to see its objects by type and its links in from and out to other steps.
+Claude assigns a step to everything it records, and asks when a new stage appears.
 
 | Node | Code | | Node | Code | | Link | Meaning |
 |---|---|---|---|---|---|---|---|
@@ -221,16 +269,21 @@ re-render (`save --no-refresh`) doesn't clear staleness. Details are in [DESIGN.
 | | |
 |---|---|
 | `init [--bare]` | create a project, or adopt an existing one in place |
+| `step define <key> "<label>" --order N` · `step set <key> <IDs>` · `step ls` | analysis steps: each object belongs to one, shown as ovals |
 | `add <type> "<label>" [path] [--copy\|--ref]` | add a node (copied + versioned, or referenced) |
 | `link A B --rel produces -p L=10 --script SC1 --cmd "…"` | record provenance with parameters |
-| `save <id> [-m msg] [--no-refresh] [--all]` | snapshot new versions; dependents go stale |
+| `save <id> -m "what" --why "reason" [--no-refresh]` | snapshot a new version; what changed is recorded automatically; dependents go stale |
+| `branch new <id> "<label>" [path] -p k=v --why "…"` | keep an alternative analysis next to the original |
+| `branch main\|alternative\|abandoned <id> --why "…"` · `branch ls` | decide which branch is the real one |
+| `suggest` · `monitor [--every 60]` | one monitor round now · a round every hour in a terminal |
+| `ignore "<glob>"` · `watch <folder>` | never report some files · also watch a folder outside the project |
 | `final <id>` · `restore <id> <v> [--out]` | mark final · bring back an old version |
 | `trace <id> [--down]` · `show <id>` · `history [id]` | how it was made · what uses it · timeline |
 | `status [--untracked]` | stale, modified, missing, untracked |
 | `article new\|place\|sync\|show` | article folder, place figures/tables, refresh after updates |
 | `plan template\|check\|apply` | the checked import protocol |
 | `ask "…"` · `context` | question the project · compact dump for AI |
-| `serve` · `export` · `watch [--autosave]` | dashboard · offline HTML · file watcher |
+| `serve` · `export` · `autosave [--save]` | dashboard · offline HTML · seconds-level file watcher |
 
 <br>
 

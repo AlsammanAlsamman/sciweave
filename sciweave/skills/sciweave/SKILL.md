@@ -72,7 +72,11 @@ When the user asks to add results from the current work to the project:
 
 | user intent | command |
 |---|---|
-| a file was regenerated | `sciweave --actor claude save T1 -m "re-run with PC3"` |
+| a file was regenerated (replaces the old) | `sciweave --actor claude save T1 -m "re-run with PC3" --why "residual stratification in QQ plot"` |
+| a parameter changed for good | `sciweave --actor claude link PL2 T2 --rel produces -p L=5 --why "..."`, then save T2 after the re-run |
+| an alternative to keep next to the original | `sciweave --actor claude branch new T2 "Credible sets (L=5)" path -p L=5 --why "sensitivity to L"` |
+| the user picks the real one | `sciweave --actor claude branch main T2b --why "..."` |
+| what changed since the last look | `sciweave suggest` (the `sciweave-monitor` skill runs this hourly) |
 | cosmetic re-render only (fonts, colours) | `sciweave --actor claude save F1 --no-refresh -m "bigger font"` |
 | this is the final version | `sciweave --actor claude final F2` |
 | start an article | `sciweave --actor claude article new "Title"` |
@@ -81,6 +85,28 @@ When the user asks to add results from the current work to the project:
 | remember something about a node | `sciweave --actor claude note T2 "HLA excluded"` |
 | what needs redoing | `sciweave status` (then regenerate in upstream order) |
 | old version back | `sciweave restore F2 1 --out /tmp/F2_v1.png` |
+
+## Steps: every object belongs to an analysis step
+
+The project is organised in ordered **steps** (e.g. `gwas` → `meta` → `finemapping` →
+`functional` → `article`). The dashboard draws each step as an oval holding its objects,
+with links drawn within and between steps.
+- Check the existing steps first: `sciweave step ls` (or the Steps section of SCIWEAVE.md).
+- Give **every node you add a `"step"`**, the stage that *produced* it. A figure made in
+  the fine-mapping step belongs to `finemapping`. The article's own items (the final numbered
+  figures/tables/supplements, sections) belong to the article-writing step.
+- A new stage → define it in the plan's `"steps"` with a label and order (ask the user where
+  it sits in the sequence if unclear). Never leave objects without a step.
+- Fix an existing object: `sciweave --actor claude step set <step> <ID> [<ID>...]`.
+
+## Updates: always with a reason, and replace vs branch
+
+Every saved version and every parameter change carries a **why** (the dashboard shows it
+beside the automatic "what changed" list). Never invent it: ask. When a new result could
+either replace an existing item or be an alternative to keep next to it (sensitivity
+analysis, other LD panel, other cohort set), ask which, then `save` (replace) or
+`branch new` (keep both). In plans, `save` entries take `"why"` and alternatives go in
+`"branches": [{"of", "label", "path", "params", "why"}]`.
 
 ## Guardrails
 

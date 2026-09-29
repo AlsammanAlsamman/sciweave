@@ -37,7 +37,10 @@ EDGE_RELATIONS: dict[str, str] = {
     "part_of": "component of an article",
     "documents": "text section that describes the target",
     "related": "loose association",
+    "variant": "alternative version of an analysis (a branch: other parameters, inputs or method)",
 }
+
+BRANCH_STATUSES = ("main", "alternative", "abandoned")
 
 PROJECT_FOLDERS = [
     "data/raw", "data/inputs", "pipelines", "scripts",

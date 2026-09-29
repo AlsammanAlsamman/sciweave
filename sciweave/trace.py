@@ -88,6 +88,9 @@ def describe(p: Project, node_id: str, status: dict | None = None) -> str:
     n = p.node(node_id)
     st = (status or p.status()).get(node_id, {})
     out = [f"{n['id']} · {n['label']}   [{n['type']}, {n['mode']}]"]
+    if n.get("step"):
+        st = p.steps.get(n["step"], {})
+        out.append(f"  step: {st.get('label', n['step'])} (#{st.get('order', '?')} of {len(p.steps)})")
     if n.get("description"):
         out.append(f"  {n['description']}")
     if n.get("path"):
@@ -100,10 +103,23 @@ def describe(p: Project, node_id: str, status: dict | None = None) -> str:
     if n["versions"]:
         out.append(f"  versions (current v{n['current_version']}, final "
                    f"{'v' + str(n['final_version']) if n['final_version'] else '-'}):")
+        from sciweave.cli import describe_change
         for v in n["versions"][-8:]:
             mark = " *final*" if v["v"] == n["final_version"] else ""
             stored = "stored" if v.get("stored") else "fingerprint"
-            out.append(f"    v{v['v']}  {v['ts']}  {stored}  {v.get('message', '')}{mark}")
+            out.append(f"    v{v['v']}  {v['ts'][:16]}  {v.get('actor', '')}  {stored}  {v.get('message', '')}{mark}")
+            if v.get("why"):
+                out.append(f"         why: {v['why']}")
+            for c in v.get("changes", []):
+                out.append(f"         - {describe_change(c)}")
+    b = n.get("branch")
+    fam = p.branch_family(node_id)
+    if len(fam) > 1:
+        out.append("  branches:")
+        for x in fam:
+            bx = p.nodes[x].get("branch") or {}
+            out.append(f"    {'*' if bx.get('status') == 'main' else ' '} {x} {bx.get('status', 'main'):11} "
+                       f"{p.nodes[x]['label']}" + (f"  (why: {bx['why']})" if bx.get("why") else ""))
     up = trace_up(p, node_id)
     if up:
         out.append("  how it was made:")

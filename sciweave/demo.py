@@ -203,7 +203,8 @@ def _build(root: Path, clock: _Clock) -> Project:
     clock.advance(days=5)
     # a second, improved version of the PIP plot, marked final
     (rd / "figures" / "pip.svg").write_text(_pip(3, 2), encoding="utf-8")
-    p.save_version(f2["id"], message="show both credible sets; colour by set")
+    p.save_version(f2["id"], message="show both credible sets; colour by set",
+                   why="reviewers could not tell the two 6p21 signals apart")
     p.mark_final(f2["id"])
     p.set_group("finemapping", [], color=None)
     p.save_graph()
@@ -235,16 +236,45 @@ def _build(root: Path, clock: _Clock) -> Project:
     lines = cov_path.read_text(encoding="utf-8").splitlines()
     lines = [lines[0] + "\tPC3"] + [ln + f"\t{round(rnd.gauss(0, 1), 3)}" for ln in lines[1:]]
     cov_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    p.save_version(cov["id"], message="add PC3 (residual stratification in QQ plot)")
+    p.save_version(cov["id"], message="add PC3",
+                   why="QQ plot showed residual stratification (lambda 1.08) with two PCs")
     clock.advance(days=1)
     # GWAS re-run: new summary stats + lead loci regenerated; figures not yet
     (gw / "output" / "sumstats.tsv").write_text((gw / "output" / "sumstats.tsv").read_text(encoding="utf-8") +
                                                 "rs9999\t6\t32100000\t1.0e-04\n", encoding="utf-8")
-    e = p.find_edge(pl1["id"], ss["id"])
-    e["params"]["covariates"] = "sex,age,PC1-PC3"
-    p.save_version(ss["id"], message="re-run with PC3", actor="claude")
+    p.link(pl1["id"], ss["id"], rel="produces", params={"covariates": "sex,age,PC1-PC3"}, actor="claude",
+           why="include PC3 as covariate (see IN2 v2)")
+    p.save_version(ss["id"], message="re-run with PC3", actor="claude",
+                   why="covariates changed: PC3 added to correct residual stratification")
     (rd / "tables" / "lead_loci.tsv").write_text((rd / "tables" / "lead_loci.tsv").read_text(encoding="utf-8")
                                                  .replace("3.1e-12", "2.7e-12"), encoding="utf-8")
-    p.save_version(t1["id"], message="regenerated after PC3 re-run", actor="claude")
+    p.save_version(t1["id"], message="regenerated after PC3 re-run", actor="claude",
+                   why="summary statistics were re-run with PC3")
+    clock.advance(hours=5)
+
+    # analysis steps: every object belongs to the stage that produced it
+    p.define_step("gwas", "GWAS", order=1, description="QC, association and lead loci in Cohort A")
+    p.define_step("finemapping", "Fine-mapping", order=2, description="SuSiE credible sets at the lead loci")
+    p.define_step("article", "Article writing", order=3, description="the manuscript: sections and placed items")
+    for nid, n in p.nodes.items():
+        key = ("article" if n["type"] in ("article", "section")
+               else "gwas" if "gwas" in n["groups"] else "finemapping")
+        p.set_step([nid], key)
+
+    # a sensitivity analysis kept NEXT to the original, as a branch
+    _tsv(rd / "tables" / "credible_sets_L5.tsv", ["locus", "cs", "SNP", "PIP"],
+         [["6p21", 1, "rs1042", 0.84], ["6p21", 2, "rs1101", 0.61], ["2q32", 1, "rs2177", 0.95]])
+    p.branch(t2["id"], "Credible sets (L=5)", path=str(rd / "tables" / "credible_sets_L5.tsv"), mode="managed",
+             params={"L": 5}, name="L=5 sensitivity", actor="claude",
+             why="reviewer asked whether the second 6p21 signal survives a smaller L")
+    p.commit()
+
+    # the monitor: a baseline round, then new results appear that are not in the network yet
+    from sciweave import monitor
+    monitor.run_round(p)
+    (rd / "figures" / "pip_L5.svg").write_text(_pip(5, 2), encoding="utf-8")
+    _tsv(rd / "tables" / "lead_loci_v2.tsv", ["locus", "lead_SNP", "CHR", "BP", "P", "OR"],
+         [["6p21", "rs1042", 6, 32_041_000, "2.7e-12", 1.41], ["2q32", "rs2177", 2, 191_900_000, "7.1e-09", 1.22]])
+    monitor.run_round(p)
     p.commit()
     return p

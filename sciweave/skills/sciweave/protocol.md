@@ -17,6 +17,20 @@
 | article | A | an article folder — created by `article new` | managed |
 | note | N | a free-standing note / decision / reviewer comment | – |
 
+## Steps (analysis stages)
+
+Every node has a `step`: the stage of the analysis that produced it, in project order,
+for example `gwas` (1) → `meta` (2) → `finemapping` (3) → `functional` (4) → `article` (5).
+- Reuse existing steps (`sciweave step ls`). Only add a new one when it really is a new stage.
+  Define it in the plan's `"steps"` with `key`, `label`, `order` and optional `description`.
+- Where a node belongs: the step that *made* it, not the one that uses it. A Manhattan plot
+  made by the GWAS step is `gwas`, even if the article uses it. The article's own numbered
+  items and its sections are `article`.
+- Links within a step, and links between steps (e.g. `meta` → `finemapping`), come out of the
+  graph automatically. Don't create anything extra for them.
+- The monitor suggests a step for new files, taken from their neighbour (`[step gwas]`).
+  Confirm it, don't blindly copy it.
+
 ## Link relations (direction = data flow)
 
 | rel | from → to | params? |
@@ -65,16 +79,18 @@ sentinels, caches. Reference one representative node (often the folder, mode
 {
   "sciweave_plan": 1,
   "summary": "SuSiE fine-mapping of the 6p21 locus (credible sets + PIP plot)",
+  "steps": [{"key": "finemapping", "label": "Fine-mapping", "order": 3,
+             "description": "SuSiE / SuSiEx credible sets at the lead loci"}],
   "nodes": [
     {"key": "fm_pipe", "type": "pipeline", "label": "Fine-mapping pipeline (SuSiE)",
-     "path": "/work/finemap/Snakefile", "mode": "ref"},
+     "path": "/work/finemap/Snakefile", "mode": "ref", "step": "finemapping"},
     {"key": "susie", "type": "script", "label": "susie_run.R",
-     "path": "/work/finemap/scripts/susie_run.R", "mode": "managed"},
+     "path": "/work/finemap/scripts/susie_run.R", "mode": "managed", "step": "finemapping"},
     {"key": "cs", "type": "table", "label": "Credible sets (finemapping)",
-     "path": "/work/finemap/out/credible_sets.tsv", "mode": "managed",
+     "path": "/work/finemap/out/credible_sets.tsv", "mode": "managed", "step": "finemapping",
      "description": "95% credible sets per locus", "groups": ["finemapping"]},
     {"key": "pip", "type": "figure", "label": "PIP plot (finemapping)",
-     "path": "/work/finemap/out/pip.png", "mode": "managed", "groups": ["finemapping"]}
+     "path": "/work/finemap/out/pip.png", "mode": "managed", "step": "finemapping", "groups": ["finemapping"]}
   ],
   "edges": [
     {"from": "T1", "to": "fm_pipe", "rel": "feeds"},

@@ -10,11 +10,14 @@ Plan format (version 1) — every list is optional:
 {
   "sciweave_plan": 1,
   "summary": "Fine-mapping results for chr6 locus",
-  "nodes":  [{"key": "fm_table", "type": "table", "label": "Credible sets (finemapping)",
+  "steps":  [{"key": "finemapping", "label": "Fine-mapping", "order": 3}],
+  "nodes":  [{"key": "fm_table", "type": "table", "label": "Credible sets (finemapping)", "step": "finemapping",
               "path": "/abs/path/credible_sets.tsv", "mode": "managed",
               "dest": "results/tables/credible_sets.tsv", "description": "...",
               "groups": ["finemapping"], "tags": [], "meta": {}}],
-  "save":   [{"node": "T1", "message": "re-run with new LD panel"}],
+  "save":   [{"node": "T1", "message": "re-run with new LD panel", "why": "EUR panel mismatched the cohort"}],
+  "branches": [{"of": "T2", "label": "Credible sets (L=5)", "path": "/abs/cs_L5.tsv", "params": {"L": 5},
+                "why": "sensitivity of credible sets to L", "name": "L=5"}],
   "edges":  [{"from": "PL1", "to": "fm_table", "rel": "produces",
               "params": {"L": 10, "coverage": 0.95}, "script": "SC1",
               "command": "snakemake -j8 finemap", "label": null, "note": ""}],
@@ -45,9 +48,10 @@ OUTPUT_TYPES = ("table", "figure", "result", "supplement")
 TEMPLATE = {
     "sciweave_plan": 1,
     "summary": "what this import adds, in one line",
+    "steps": [{"key": "gwas", "label": "GWAS", "order": 1}],
     "nodes": [
         {"key": "my_table", "type": "table", "label": "Short name (topic)", "path": "/abs/path/to/file.tsv",
-         "mode": "managed", "description": "", "groups": [], "tags": []}
+         "mode": "managed", "step": "gwas", "description": "", "groups": [], "tags": []}
     ],
     "save": [],
     "edges": [
@@ -101,6 +105,12 @@ def check(p: Project, plan: dict) -> Report:
     if not plan.get("summary"):
         r.warn('no "summary": say in one line what this import adds (it goes into history)')
 
+    plan_steps = {s.get("key"): s for s in plan.get("steps", []) if isinstance(s, dict)}
+    for i, s in enumerate(plan.get("steps", [])):
+        if not isinstance(s, dict) or not s.get("key") or " " in str(s.get("key")):
+            r.error(f"steps[{i}]: needs a one-word \"key\" (e.g. gwas)")
+        elif s["key"] not in p.steps:
+            r.ok(f"step {s['key']}: {s.get('label', s['key'])} (new)")
     keys: dict[str, dict] = {}
     explicit = [n["id"] for n in plan.get("nodes", []) if n.get("id")]
     for dup in sorted({x for x in explicit if explicit.count(x) > 1}):
@@ -165,6 +175,12 @@ def check(p: Project, plan: dict) -> Report:
                 r.error(f"{where}: history file not found: {h['path']}")
         if n.get("history"):
             r.ok(f"{where}: {len(n['history'])} older version(s) imported into its history")
+        stp = n.get("step")
+        if not stp and t not in ("note",):
+            r.warn(f"{where}: no \"step\" — say which analysis step it belongs to (e.g. gwas, finemapping, article)")
+        elif stp and stp not in p.steps and stp not in plan_steps:
+            r.warn(f"{where}: step '{stp}' is not defined; it will be created with the label '{stp.capitalize()}' "
+                   f"(define it in \"steps\" to give it a label and order)")
         for g in n.get("groups", []):
             if not isinstance(g, str):
                 r.error(f"{where}: groups must be strings")
@@ -189,7 +205,25 @@ def check(p: Project, plan: dict) -> Report:
         elif not p.nodes[nid]["path"]:
             r.error(f"save[{i}]: {nid} has no path to version")
         else:
-            r.ok(f"save {nid}: new version ({s.get('message', '')})")
+            if not s.get("why"):
+                r.warn(f"save[{i}] {nid}: no \"why\" — say why it was updated (it is shown with the version)")
+            r.ok(f"save {nid}: new version ({s.get('message', '')})" + (f" because {s['why']}" if s.get("why") else ""))
+
+    for i, b in enumerate(plan.get("branches", [])):
+        where = f"branches[{i}]"
+        if b.get("of") not in p.nodes:
+            r.error(f"{where}: 'of' must be an existing node id, got {b.get('of')!r}")
+        if not b.get("label"):
+            r.error(f"{where}: needs a label")
+        if not b.get("why"):
+            r.error(f"{where}: a branch needs a \"why\" (what question does this alternative answer?)")
+        if b.get("path") and not Path(b["path"]).expanduser().exists():
+            r.error(f"{where}: path does not exist: {b['path']}")
+        for k, v in (b.get("params") or {}).items():
+            if not is_scalar_param(v):
+                r.error(f"{where}: param '{k}' must be a scalar or list of scalars")
+        if b.get("of") in p.nodes and not r.errors:
+            r.ok(f"{where}: branch of {b['of']}: {b.get('label')} [{', '.join(f'{k}={v}' for k, v in (b.get('params') or {}).items())}]")
 
     adj: dict[str, set] = {}
     for e in p.edges:
@@ -286,6 +320,9 @@ def apply(p: Project, plan: dict, actor: str = "claude") -> dict[str, str]:
         return ids.get(ref, ref)
 
     try:
+        for s in plan.get("steps", []):
+            p.define_step(s["key"], s.get("label"), order=s.get("order"), description=s.get("description", ""),
+                          actor=actor)
         # explicit ids first, so an auto id (e.g. step -> ST1) can never take a code the plan reserved
         for n in sorted(plan.get("nodes", []), key=lambda x: not x.get("id")):
             key = n.get("key") or n.get("id")
@@ -293,16 +330,22 @@ def apply(p: Project, plan: dict, actor: str = "claude") -> dict[str, str]:
                               dest=n.get("dest"), description=n.get("description", ""),
                               groups=n.get("groups", []), tags=n.get("tags", []), meta=n.get("meta"),
                               node_id=n.get("id"), actor=actor, message=n.get("message") or plan.get("summary", "imported"),
-                              history=n.get("history"))
+                              history=n.get("history"), step=n.get("step"))
             if node["meta"].get("origin"):  # add_node copied the file into the project
                 created_files.append(p.resolve(node["path"]))
             ids[key] = node["id"]
         for e in plan.get("edges", []):
             p.link(rid(e["from"]), rid(e["to"]), rel=e["rel"], params=e.get("params") or {},
                    script=rid(e["script"]) if e.get("script") else None, command=e.get("command"),
-                   note=e.get("note", ""), label=e.get("label"), params_file=e.get("params_file"), actor=actor)
+                   note=e.get("note", ""), label=e.get("label"), params_file=e.get("params_file"), actor=actor,
+                   why=e.get("why", ""))
         for s in plan.get("save", []):
-            p.save_version(s["node"], message=s.get("message", ""), actor=actor)
+            p.save_version(s["node"], message=s.get("message", ""), actor=actor, why=s.get("why", ""))
+        for b in plan.get("branches", []):
+            n = p.branch(b["of"], b["label"], path=b.get("path"), mode=b.get("mode"), params=b.get("params"),
+                         why=b["why"], name=b.get("name"), actor=actor)
+            if b.get("key"):
+                ids[b["key"]] = n["id"]
         for nt in plan.get("notes", []):
             p.add_note(rid(nt["node"]), nt["text"], actor=actor)
         for g in plan.get("groups", []):

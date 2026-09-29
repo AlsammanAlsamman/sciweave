@@ -158,6 +158,48 @@ Full text: `sciweave/skills/sciweave/SKILL.md` and `protocol.md`.
 - **Save button** on a node = snapshot a new version.
 - `sciweave export` writes a static, offline `sciweave.html` to share.
 
+## 8b. Monitor, updates and branches
+
+**Monitor.** `sciweave/monitor.py::run_round` is one deterministic, metadata-only round:
+- tracked files changed on disk;
+- untracked files that are new since the last round, with a guessed type and a
+  `version_of` / `near` hint;
+- missing files and stale items.
+
+Everything it has already reported is remembered in `.sciweave/monitor.json`, so each
+round reports only what's new. The first round is a baseline (per-folder summary, no
+flood).
+
+Ways to run it:
+- the `sciweave-monitor` Claude skill starts `/loop 60m /sciweave-monitor round`;
+- each loop tick calls `sciweave monitor --due 50`, which prints nothing unless a round is
+  due and something is new;
+- `sciweave monitor` runs rounds in a terminal;
+- the dashboard's 🔔 shows the latest round.
+
+Design constraint, learned from brainny: a timed loop fires *inside* the Claude session
+and can land mid-task. So a round is silent when there's nothing new, stays at most 3 lines
+when it interrupts work, resumes the task, and never applies anything.
+
+**Updates.** Each version stores `why` (given by the user or Claude) and `changes`, which
+is computed automatically against the previous version:
+- `input` / `script` vN → vM, plus added or dropped inputs;
+- `param` key old → new on a given link;
+- `content` size.
+
+Parameter edits on an existing link are appended to `edge.changes` with their own `why`.
+Snapshots are copies, so a later edit can never rewrite history.
+
+**Branches.** `Project.branch()` creates an alternative node:
+- it copies the original's provenance links, with the parameter overrides applied to the
+  link that carries them;
+- it adds a `variant` link (soft: no staleness) from the original;
+- it records `branch = {of, name, why, status}`.
+
+`set_branch_status(main|alternative|abandoned, why)` keeps exactly one `main` per family
+and stores the decision's reason. The dashboard shows a family in the node panel and a
+branch badge on alternatives.
+
 ## 9. Roadmap
 
 - **v0.1 (this):** model, versions, staleness, history, CLI, plan protocol,

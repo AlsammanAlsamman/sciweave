@@ -40,4 +40,4 @@ include = ["sciweave*"]
 [tool.setuptools.package-data]
 # dashboard assets, vendored D3 (inlined into the HTML: no CDN, works offline)
 # and the Claude skill must ship inside the wheel, not just the source tree
-sciweave = ["dashboard/*", "vendor/*", "skills/sciweave/*"]
+sciweave = ["dashboard/*", "vendor/*", "skills/*/*"]

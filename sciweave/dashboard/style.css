@@ -150,6 +150,15 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .legend h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-3); }
 .legend .grid { display: grid; grid-template-columns: repeat(3, auto); gap: 2px 12px; margin-bottom: 6px; }
 .legend .row { display: flex; align-items: center; gap: 6px; }
+.legend .type-toggle { cursor: pointer; border-radius: 6px; padding: 1px 5px; margin: 0 -5px; user-select: none; }
+.legend .type-toggle:hover { background: var(--surface-2); }
+.legend .type-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.legend .type-toggle.off { opacity: 0.4; }
+.legend .type-toggle.off .tname { text-decoration: line-through; }
+.legend .type-toggle.empty { opacity: 0.55; }
+.legend .type-toggle.off.empty { opacity: 0.3; }
+.legend-hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.legend-showall { text-transform: none; letter-spacing: 0; font-size: 11px; margin-left: 4px; }
 .legend svg { flex: none; }
 
 /* ---- side panel ---- */
@@ -226,6 +235,40 @@ a.nid:hover { text-decoration: underline; }
 .edge.plain { stroke: var(--edge-plain); }
 .edge.code { stroke-width: 1px; opacity: 0.75; }
 .edge.stale { stroke-dasharray: 6 4; }
+.edge.variant { stroke: var(--text-2); stroke-width: 2.2px; stroke-dasharray: 0.5 6; stroke-linecap: round; opacity: 0.9; }
+.node-g.abandoned { opacity: 0.45; }
+.node-g .branch-badge { font-size: 12px; font-weight: 700; fill: var(--text-2); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+.node-g .recent-dot { fill: var(--accent); stroke: var(--bg); stroke-width: 1.5px; }
+.icon-btn .badge { position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--stale); color: #1a1a19; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
+.upd { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; background: var(--surface-2); }
+.upd.param { border-style: dashed; }
+.upd-head { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; flex-wrap: wrap; }
+.upd-head .acts { margin-left: auto; display: flex; gap: 8px; }
+.upd-why { font-size: 13px; margin-top: 4px; }
+.upd-why b { color: var(--text-3); font-weight: 600; margin-right: 4px; }
+.upd-msg { font-size: 12.5px; color: var(--text-2); margin-top: 2px; }
+.chg { display: inline-block; font-size: 11.5px; margin: 4px 4px 0 0; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); font-family: "JetBrains Mono", Consolas, monospace; }
+.chg.param { border-color: var(--edge-params); }
+.chg.input { border-color: var(--stale); }
+.why { color: var(--text-2); font-style: italic; }
+.br { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; }
+.br:last-child { border-bottom: none; }
+.br .st-main { border-color: var(--edge-plain); color: var(--text); }
+.br .st-abandoned { text-decoration: line-through; }
+.sg-item { padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.sg-item:last-child { border-bottom: none; }
+.sg-item .row2 { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+.sg-path { font-family: "JetBrains Mono", Consolas, monospace; font-size: 11.5px; word-break: break-all; }
+.edge.cross { stroke-width: 2.1px; }
+.step-oval { cursor: pointer; }
+.step-oval:hover { fill-opacity: 0.16 !important; }
+.halo-label.step-label { pointer-events: all; cursor: pointer; font-size: 13px; }
+.halo-label.step-label:hover { fill: var(--text); }
+.step-flow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.step-flow .chip { cursor: pointer; }
+.type-count { display: inline-flex; align-items: center; gap: 4px; margin: 0 10px 4px 0; font-size: 12.5px; }
 .edge-hit { fill: none; stroke: transparent; stroke-width: 12px; cursor: pointer; }
 .edge-badge { font-size: 9.5px; fill: var(--text-2); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; pointer-events: none; }
 .halo-label { font-size: 12px; font-weight: 600; fill: var(--text-2); text-transform: uppercase; letter-spacing: 0.8px; pointer-events: none; }

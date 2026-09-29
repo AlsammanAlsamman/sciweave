@@ -52,16 +52,26 @@ def graph_context(p: Project) -> str:
     if p.graph["project"].get("description"):
         lines.append(p.graph["project"]["description"])
     lines.append("")
-    lines.append("NODES (id | type | label | path | current/final version | state | groups | description)")
+    if p.steps:
+        lines.append("STEPS (analysis stages, in order): " + " -> ".join(
+            f"{k} ({v['label']})" for k, v in sorted(p.steps.items(), key=lambda kv: kv[1].get("order", 0))))
+    lines.append("NODES (id | type | label | step | path | current/final version | state | groups | description)")
     for nid in sorted(p.nodes):
         n = p.nodes[nid]
         lines.append(" | ".join([
-            nid, n["type"], n["label"], n["path"] or "-",
+            nid, n["type"], n["label"], n.get("step") or "-", n["path"] or "-",
             f"v{n['current_version'] or '-'}/{'v' + str(n['final_version']) if n['final_version'] else '-'}",
             status[nid]["state"], ",".join(n["groups"]) or "-", (n.get("description") or "")[:200],
         ]))
         for note in n["notes"][-3:]:
             lines.append(f"    note: {note['text'][:200]}")
+        for v in n["versions"][-3:]:
+            if v.get("why"):
+                lines.append(f"    v{v['v']} ({v['ts'][:10]}) why: {v['why'][:200]}")
+        if n.get("branch"):
+            b = n["branch"]
+            lines.append(f"    branch: {b.get('status')} " + (f"of {b['of']} " if b.get("of") else "") +
+                         (f"why: {b.get('why', '')[:200]}" if b.get("why") else ""))
     lines.append("")
     lines.append("EDGES (source -rel-> target [params] script cmd)")
     for e in sorted(p.edges, key=lambda x: x["id"]):

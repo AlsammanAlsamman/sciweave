@@ -89,7 +89,7 @@ def cmd_add(args):
     mode = "managed" if args.copy else "ref" if args.ref else ("managed" if args.type in ("table", "figure", "supplement", "script", "section") else "ref")
     n = p.add_node(args.type, args.label, path=args.path, mode=mode, dest=args.dest,
                    description=args.desc or "", groups=args.group or [], tags=args.tag or [],
-                   node_id=args.id, message=args.message or "added", actor=args.actor)
+                   node_id=args.id, message=args.message or "added", actor=args.actor, step=args.step)
     p.commit()
     print(f"added {n['id']} · {n['label']}  ({n['type']}, {n['mode']}{', ' + n['path'] if n['path'] else ''})")
 
@@ -98,7 +98,7 @@ def cmd_link(args):
     p = get_project(args)
     e = p.link(args.source, args.target, rel=args.rel, params=parse_params(args.param), script=args.script,
                command=args.cmd, note=args.note or "", label=args.label, params_file=args.params_file,
-               actor=args.actor)
+               actor=args.actor, why=args.why or "")
     p.commit()
     print(f"{e['id']}: {edge_line(p, e)}")
 
@@ -120,8 +120,12 @@ def cmd_save(args):
         print("nothing to save (no ids given, and --all found no modified files)")
         return
     for nid in ids:
-        v = p.save_version(nid, message=args.message or "", actor=args.actor, refresh_edges=not args.no_refresh)
+        v = p.save_version(nid, message=args.message or "", actor=args.actor, refresh_edges=not args.no_refresh,
+                           why=args.why or "")
         print(f"{nid}: " + (f"saved v{v['v']}" if v else "unchanged"))
+        if v:
+            for c in v["changes"]:
+                print(f"    {describe_change(c)}")
     p.commit()
     st = p.status(check_disk=False)
     down = sorted({d for nid in ids for d in p.downstream(nid) if st[d]["stale"]})
@@ -160,7 +164,7 @@ def cmd_group(args):
 def cmd_edit(args):
     p = get_project(args)
     n = p.update_node(args.id, label=args.label, description=args.desc, tags=args.tag, groups=args.group,
-                      actor=args.actor)
+                      step=args.step, actor=args.actor)
     p.commit()
     print(f"updated {n['id']} · {n['label']}")
 
@@ -245,6 +249,163 @@ def cmd_plan(args):
         print(f"  {k} -> {v} · {p.nodes[v]['label']}")
 
 
+def describe_change(c: dict) -> str:
+    k = c["kind"]
+    if k == "param":
+        src = f" (from {c['source']})" if c.get("source") else ""
+        return f"param {c['key']}: {c.get('from')} -> {c.get('to')}{src}"
+    if k in ("input", "script"):
+        return f"{k} {c['node']}: v{c['from']} -> v{c['to']}"
+    if k.startswith("added_"):
+        return f"new {k[6:]} {c['node']} (v{c['to']})"
+    if k == "dropped_input":
+        return f"input {c['node']} no longer used"
+    if k == "content":
+        return f"file size {c['from']:,} -> {c['to']:,} bytes"
+    return str(c)
+
+
+def cmd_step(args):
+    p = get_project(args)
+    a = args.args
+    if args.action == "define":
+        if not a:
+            raise SciWeaveError('usage: sciweave step define <key> "<label>" [--order N] [--desc "..."]')
+        st = p.define_step(a[0], a[1] if len(a) > 1 else None, order=args.order, description=args.desc or "",
+                           actor=args.actor)
+        p.commit()
+        print(f"step {a[0]}: {st['label']} (#{st['order']})")
+    elif args.action == "set":
+        if len(a) < 2:
+            raise SciWeaveError("usage: sciweave step set <key> <ID> [<ID> ...]   (key 'none' clears)")
+        done = p.set_step(a[1:], None if a[0] == "none" else a[0], actor=args.actor)
+        p.commit()
+        print(f"{a[0]}: {', '.join(done) if done else 'nothing changed'}")
+    else:  # ls
+        summ = p.step_summary()
+        steps = sorted(p.steps.items(), key=lambda kv: kv[1].get("order", 0))
+        label = {k: v["label"] for k, v in steps}
+        for k, st in steps + ([(None, {"label": "(no step)", "order": ""})] if None in summ else []):
+            s = summ.get(k, {"members": [], "within": 0, "in": {}, "out": {}})
+            types = {}
+            for nid in s["members"]:
+                types[p.nodes[nid]["type"]] = types.get(p.nodes[nid]["type"], 0) + 1
+            print(f"{str(st.get('order', '')):>3}  {k or '-':14} {st['label'][:30]:30} {len(s['members']):3} objects  "
+                  + ", ".join(f"{v} {t}" for t, v in sorted(types.items())))
+            if s["within"] or s["in"] or s["out"]:
+                ins = ", ".join(f"{label.get(x, '(no step)')} {n}" for x, n in s["in"].items())
+                outs = ", ".join(f"{label.get(x, '(no step)')} {n}" for x, n in s["out"].items())
+                print(f"       links: {s['within']} within" + (f" | in from {ins}" if ins else "")
+                      + (f" | out to {outs}" if outs else ""))
+
+
+def cmd_branch(args):
+    p = get_project(args)
+    if args.action == "new":
+        if len(args.args) < 2:
+            raise SciWeaveError('usage: sciweave branch new <ID> "<label>" [path] -p key=value --why "..."')
+        src, label = args.args[0], args.args[1]
+        path = args.args[2] if len(args.args) > 2 else None
+        mode = "managed" if args.copy else ("ref" if args.ref else None)
+        n = p.branch(src, label, path=path, mode=mode, params=parse_params(args.param), why=args.why or "",
+                     name=args.name, actor=args.actor)
+        p.commit()
+        print(f"branch {n['id']} · {n['label']}  (variant of {src}: {args.why})")
+    elif args.action in ("main", "alternative", "abandoned"):
+        if not args.args:
+            raise SciWeaveError(f"usage: sciweave branch {args.action} <ID> --why \"...\"")
+        p.set_branch_status(args.args[0], args.action, why=args.why or "", actor=args.actor)
+        p.commit()
+        print(f"{args.args[0]} is now {args.action}")
+    else:  # ls
+        nid = args.args[0] if args.args else None
+        fams = [p.branch_family(nid)] if nid else []
+        if not nid:
+            roots = {p.branch_family(x)[0] for x, n in p.nodes.items() if n.get("branch")}
+            fams = [p.branch_family(r) for r in sorted(roots)]
+        if not fams:
+            print("no branches yet (sciweave branch new <ID> ...)")
+        for fam in fams:
+            for x in fam:
+                b = p.nodes[x].get("branch") or {}
+                mark = "*" if b.get("status") == "main" else " "
+                print(f" {mark} {x:6} {b.get('status', 'main'):11} {p.nodes[x]['label'][:44]:44} "
+                      f"{('why: ' + b['why']) if b.get('why') else ''}")
+            print()
+
+
+def cmd_suggest(args):
+    from sciweave import monitor
+    p = get_project(args)
+    r = monitor.run_round(p, update=not args.peek)
+    if args.json:
+        print(json.dumps(r, indent=1))
+        return
+    text = monitor.render(p, r)
+    print(text if text else "nothing new since the last round")
+
+
+def cmd_monitor(args):
+    import time
+    from sciweave import monitor
+    p = get_project(args)
+    if args.status:
+        m = monitor.minutes_since_last(p)
+        st = monitor.load_state(p)
+        print(f"last round: {st.get('last_round') or 'never'}" + (f" ({m:.0f} min ago)" if m is not None else ""))
+        print(f"remembered files: {len(st.get('seen', {}))} · ignore: {st.get('ignore') or '-'} · "
+              f"extra roots: {st.get('roots') or '-'}")
+        for rd in st.get("rounds", [])[-5:]:
+            print(f"  {rd['ts'][:16]}  updated {rd['updated']} · new {rd['new']} · stale {rd['stale']}")
+        return
+    if args.due is not None:  # used by the Claude skill: exit 0 and print the round only when due
+        m = monitor.minutes_since_last(p)
+        if m is not None and m < args.due:
+            return
+        r = monitor.run_round(p)
+        text = monitor.render(p, r)
+        if text:
+            print(text)
+        return
+    print(f"SciWeave monitor on '{p.graph['project']['name']}': a round every {args.every} min (Ctrl+C to stop)")
+    try:
+        while True:
+            p.load()
+            r = monitor.run_round(p)
+            text = monitor.render(p, r)
+            stamp = r["ts"][11:16]
+            print(f"\n[{stamp}] " + (text if text else "nothing new"), flush=True)
+            if args.once:
+                return
+            time.sleep(args.every * 60)
+    except KeyboardInterrupt:
+        print("\nmonitor stopped")
+
+
+def cmd_ignore(args):
+    from sciweave import monitor
+    p = get_project(args)
+    st = monitor.load_state(p)
+    for pat in args.patterns:
+        if pat not in st["ignore"]:
+            st["ignore"].append(pat)
+    monitor.save_state(p, st)
+    print("ignoring: " + ", ".join(st["ignore"]))
+
+
+def cmd_watch_root(args):
+    from sciweave import monitor
+    p = get_project(args)
+    st = monitor.load_state(p)
+    path = str(Path(args.path).expanduser().resolve())
+    if not Path(path).is_dir():
+        raise SciWeaveError(f"not a folder: {path}")
+    if path not in st["roots"]:
+        st["roots"].append(path)
+    monitor.save_state(p, st)
+    print("extra folders watched: " + ", ".join(st["roots"]))
+
+
 def cmd_context(args):
     from sciweave.ai import graph_context
     print(graph_context(get_project(args)))
@@ -286,14 +447,17 @@ def cmd_types(args):
 
 
 def cmd_install_skill(args):
-    src = Path(__file__).parent / "skills" / "sciweave"
-    dest = Path(args.dest).expanduser() if args.dest else Path.home() / ".claude" / "skills" / "sciweave"
-    dest.mkdir(parents=True, exist_ok=True)
-    for f in src.iterdir():
-        if f.is_file():
-            shutil.copy2(f, dest / f.name)
-    print(f"installed the SciWeave skill to {dest}")
-    print("  in Claude Code: \"add these results to my sciweave project\" or /sciweave")
+    base = Path(args.dest).expanduser() if args.dest else Path.home() / ".claude" / "skills"
+    for src in sorted((Path(__file__).parent / "skills").iterdir()):
+        if not src.is_dir():
+            continue
+        dest = base / src.name
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in src.iterdir():
+            if f.is_file():
+                shutil.copy2(f, dest / f.name)
+        print(f"installed skill {src.name} -> {dest}")
+    print("  in Claude Code: \"add these results to my SciWeave project\" · /sciweave-monitor to start hourly rounds")
 
 
 # -------------------------------------------------------------------- parser --
@@ -337,6 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--group", action="append")
     s.add_argument("--tag", action="append")
     s.add_argument("--id", help="explicit id (default: next T1/F2/...)")
+    s.add_argument("--step", help="analysis step this object belongs to (e.g. gwas, finemapping, article)")
     s.add_argument("-m", "--message")
 
     s = cmd("link", cmd_link, "record provenance: SOURCE -rel-> TARGET")
@@ -349,6 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--label", help='e.g. "Figure 2" for part_of links')
     s.add_argument("--note")
     s.add_argument("--params-file", help="config file to snapshot with the link (e.g. config.yaml)")
+    s.add_argument("--why", help="reason for a parameter change (kept in the link's change log)")
 
     s = cmd("unlink", cmd_unlink, "remove a link by id (E12)")
     s.add_argument("edge")
@@ -357,6 +523,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("ids", nargs="*")
     s.add_argument("-m", "--message")
     s.add_argument("--all", action="store_true", help="save every node modified on disk")
+    s.add_argument("--why", help="the reason for this update (kept with the version, shown in the dashboard)")
     s.add_argument("--no-refresh", action="store_true",
                    help="cosmetic change: do not mark the node as rebuilt from current inputs")
 
@@ -386,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--desc")
     s.add_argument("--tag", action="append")
     s.add_argument("--group", action="append")
+    s.add_argument("--step")
 
     s = cmd("rm", cmd_rm, "remove a node (and its links) from the graph")
     s.add_argument("id")
@@ -402,9 +570,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", nargs="?")
     s.add_argument("-n", type=int, default=50)
 
-    s = cmd("watch", cmd_watch, "poll tracked files and log changes")
+    s = cmd("autosave", cmd_watch, "poll tracked files every few seconds; log changes (or --save them)")
     s.add_argument("--interval", type=float, default=5.0)
-    s.add_argument("--autosave", action="store_true", help="save managed files automatically when they change")
+    s.add_argument("--save", dest="autosave", action="store_true", help="save managed files automatically")
     s.add_argument("--once", action="store_true")
 
     s = cmd("article", cmd_article, "article templates: new / place / sync / show")
@@ -418,6 +586,39 @@ def build_parser() -> argparse.ArgumentParser:
     s = cmd("plan", cmd_plan, "import protocol: template / check / apply a plan.json")
     s.add_argument("action", choices=["template", "check", "apply"])
     s.add_argument("file", nargs="?")
+
+    s = cmd("step", cmd_step, "analysis steps (GWAS, fine-mapping, article...): define / set / ls")
+    s.add_argument("action", choices=["define", "set", "ls"])
+    s.add_argument("args", nargs="*", help='define: key "label" · set: key ID [ID ...] · ls')
+    s.add_argument("--order", type=int, help="position of the step in the analysis (1, 2, 3 ...)")
+    s.add_argument("--desc")
+
+    s = cmd("branch", cmd_branch, "alternative versions of an analysis: new / main / alternative / abandoned / ls")
+    s.add_argument("action", choices=["new", "main", "alternative", "abandoned", "ls"])
+    s.add_argument("args", nargs="*", help='new: ID "label" [path] · main/alternative/abandoned: ID · ls: [ID]')
+    s.add_argument("-p", "--param", action="append", help="overridden parameter key=value (repeatable)")
+    s.add_argument("--why", help="why this branch exists / why this decision")
+    s.add_argument("--name", help="short branch name, e.g. 'L=5 sensitivity'")
+    m = s.add_mutually_exclusive_group()
+    m.add_argument("--copy", action="store_true")
+    m.add_argument("--ref", action="store_true")
+
+    s = cmd("suggest", cmd_suggest, "one monitor round now: changed, new, missing and stale results")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--peek", action="store_true", help="look without remembering (next round reports it again)")
+
+    s = cmd("monitor", cmd_monitor, "look for new analysis results every hour and suggest updates")
+    s.add_argument("--every", type=float, default=60, help="minutes between rounds (default 60)")
+    s.add_argument("--once", action="store_true")
+    s.add_argument("--status", action="store_true", help="when was the last round, what is remembered")
+    s.add_argument("--due", type=float, metavar="MIN",
+                   help="run a round only if the last one was at least MIN minutes ago (for the Claude skill)")
+
+    s = cmd("ignore", cmd_ignore, "never report files matching these glob patterns")
+    s.add_argument("patterns", nargs="+")
+
+    s = cmd("watch", cmd_watch_root, "also monitor a folder outside the project (e.g. a pipeline's results)")
+    s.add_argument("path")
 
     cmd("context", cmd_context, "print the whole project as compact text (for AI)")
 

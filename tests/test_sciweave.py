@@ -303,3 +303,146 @@ def test_failed_apply_rolls_back_history(proj, tmp_path):
     with pytest.raises(SciWeaveError):
         plan.apply(proj, bad)
     assert len(proj.history()) == before and proj.nodes == {}
+
+
+# ---------------------------------------------------------------- updates / branches / monitor
+
+def test_version_records_why_and_changes(chain, proj):
+    proj.link(chain["pl"], chain["ss"], rel="produces", params={"maf": 0.05}, why="stricter MAF after QC review")
+    e = proj.find_edge(chain["pl"], chain["ss"], "produces")
+    assert e["changes"][-1]["params"] == {"maf": [0.01, 0.05]} and e["changes"][-1]["why"].startswith("stricter")
+    proj.resolve(proj.nodes[chain["cov"]]["path"]).write_text("a\n9\n", encoding="utf-8")
+    proj.save_version(chain["cov"], message="PC3 added", why="residual stratification")
+    proj.resolve(proj.nodes[chain["ss"]]["path"]).write_text("p\n0.3000\n", encoding="utf-8")
+    v = proj.save_version(chain["ss"], message="re-run", why="new covariates + MAF")
+    kinds = {(c["kind"], c.get("key") or c.get("node")) for c in v["changes"]}
+    assert ("param", "maf") in kinds and ("input", chain["cov"]) in kinds and ("content", None) in kinds
+    assert v["why"] == "new covariates + MAF"
+    assert proj.history()[-1]["why"] == "new covariates + MAF"
+
+
+def test_branch_create_and_choose(chain, proj, tmp_path):
+    alt = write(tmp_path / "alt" / "lead_p1e-6.tsv", "snp\nrs1\nrs7\n")
+    with pytest.raises(SciWeaveError, match="reason"):
+        proj.branch(chain["tab"], "Lead loci (P<1e-6)", path=str(alt))
+    b = proj.branch(chain["tab"], "Lead loci (P<1e-6)", path=str(alt), mode="managed", params={"p": 1e-6},
+                    why="suggestive loci for replication")
+    assert b["branch"]["of"] == chain["tab"] and b["branch"]["status"] == "alternative"
+    assert proj.nodes[chain["tab"]]["branch"]["status"] == "main"
+    e = proj.find_edge(chain["ss"], b["id"], "derives")
+    assert e["params"] == {"p": 1e-6}                        # overridden on the carrying link
+    assert proj.find_edge(chain["tab"], b["id"], "variant")
+    assert proj.status()[b["id"]]["state"] == "ok"          # variant links never make things stale
+    assert set(proj.branch_family(b["id"])) == {chain["tab"], b["id"]}
+    proj.set_branch_status(b["id"], "main", why="replication cohort is large enough")
+    assert proj.nodes[b["id"]]["branch"]["status"] == "main"
+    assert proj.nodes[chain["tab"]]["branch"]["status"] == "alternative"
+    assert proj.nodes[b["id"]]["branch"]["decision"]["why"].startswith("replication")
+
+
+def test_monitor_rounds(chain, proj):
+    from sciweave import monitor
+    r0 = monitor.run_round(proj)
+    assert r0["first_round"] and r0["new"] == []            # baseline: no flood
+    # a new result next to a tracked table, a near-duplicate name of it, and noise
+    tdir = proj.resolve(proj.nodes[chain["tab"]]["path"]).parent
+    write(tdir / "lead_v2.tsv", "snp\nrs2\n")
+    write(tdir / "brand_new_plot.png", "png")
+    write(proj.root / "logs" / "run.log", "x")
+    proj.resolve(proj.nodes[chain["fig"]]["path"]).write_text("<svg changed/>", encoding="utf-8")
+    r1 = monitor.run_round(proj)
+    paths = {n["path"].split("/")[-1]: n for n in r1["new"]}
+    assert "lead_v2.tsv" in paths and paths["lead_v2.tsv"]["version_of"] == chain["tab"]
+    assert paths["brand_new_plot.png"]["type"] == "figure" and "run.log" not in paths
+    assert [u["node"] for u in r1["updated"]] == [chain["fig"]]
+    text = monitor.render(proj, r1)
+    assert "NEW" in text and "UPDATED" in text
+    r2 = monitor.run_round(proj)                              # already reported -> quiet
+    assert r2["new"] == []
+    st = monitor.load_state(proj)
+    st["ignore"].append("*.tsv")
+    monitor.save_state(proj, st)
+    write(tdir / "another.tsv", "x")
+    assert monitor.run_round(proj)["new"] == []
+    assert monitor.minutes_since_last(proj) < 1
+
+
+def test_plan_branches_and_why(chain, proj, tmp_path):
+    alt = write(tmp_path / "b" / "alt.tsv", "snp\nrs3\n")
+    pl = {"sciweave_plan": 1, "summary": "sensitivity",
+          "save": [{"node": chain["tab"], "message": "noop"}],
+          "branches": [{"key": "alt", "of": chain["tab"], "label": "Lead loci (alt)", "path": str(alt),
+                        "params": {"p": 1e-5}}]}
+    rep = plan.check(proj, pl)
+    assert not rep.passed and "needs a \"why\"" in rep.render()
+    pl["branches"][0]["why"] = "check robustness"
+    rep = plan.check(proj, pl)
+    assert rep.passed and "no \"why\"" in rep.render()
+    ids = plan.apply(proj, pl)
+    assert proj.nodes[ids["alt"]]["branch"]["why"] == "check robustness"
+
+
+def test_cli_suggest_and_branch(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "c2"
+    main(["init", str(root)])
+    monkeypatch.chdir(root)
+    f = write(root / "results" / "tables" / "t.tsv", "a\n1\n")
+    main(["add", "table", "T", str(f)])
+    assert main(["suggest"]) == 0
+    write(root / "results" / "tables" / "t_new.tsv", "a\n2\n")
+    assert main(["suggest"]) == 0
+    assert main(["monitor", "--due", "60"]) == 0               # not due: silent
+    g = write(root / "results" / "tables" / "t_alt.tsv", "a\n3\n")
+    assert main(["branch", "new", "T1", "T alt", str(g), "--why", "alt method"]) == 0
+    assert main(["branch", "main", "T2", "--why", "better"]) == 0
+    assert main(["branch", "ls"]) == 0
+    out = capsys.readouterr().out
+    assert "baseline" in out and "t_new.tsv" in out and "T2" in out and "main" in out
+
+
+# ---------------------------------------------------------------- steps
+
+def test_steps_define_assign_summary(chain, proj):
+    proj.define_step("gwas", "GWAS", order=1)
+    proj.define_step("plots", "Figures", order=2)
+    proj.set_step([chain["cov"], chain["pl"], chain["ss"], chain["qc"], chain["tab"]], "gwas")
+    proj.set_step([chain["fig"]], "plots")
+    s = proj.step_summary()
+    assert set(s["gwas"]["members"]) == {chain[k] for k in ("cov", "pl", "ss", "qc", "tab")}
+    assert s["plots"]["in"] == {"gwas": 1} and s["gwas"]["out"] == {"plots": 1}
+    assert s["gwas"]["within"] == 4
+    assert proj.nodes[chain["fig"]]["step"] == "plots"
+    assert "## Steps" in open(proj.write_map(), encoding="utf-8").read()
+    n = proj.add_node("note", "x", step="newstep")                 # unknown step is created on the fly
+    assert proj.steps["newstep"]["order"] == 3 and n["step"] == "newstep"
+    with pytest.raises(SciWeaveError):
+        proj.define_step("two words")
+
+
+def test_plan_steps(chain, proj, tmp_path):
+    f = write(tmp_path / "s" / "fm.tsv", "a\n1\n")
+    pl = {"sciweave_plan": 1, "summary": "fm",
+          "steps": [{"key": "finemapping", "label": "Fine-mapping", "order": 2}],
+          "nodes": [{"key": "fm", "type": "table", "label": "Credible sets", "path": str(f), "mode": "managed",
+                     "step": "finemapping"},
+                    {"key": "nostep", "type": "table", "label": "Other", "path": str(f), "mode": "ref"}],
+          "edges": [{"from": chain["ss"], "to": "fm", "rel": "derives", "params": {"L": 10}},
+                    {"from": chain["ss"], "to": "nostep", "rel": "derives", "params": {"x": 1}}]}
+    rep = plan.check(proj, pl)
+    assert rep.passed and 'no "step"' in rep.render()
+    ids = plan.apply(proj, pl)
+    assert proj.nodes[ids["fm"]]["step"] == "finemapping" and proj.steps["finemapping"]["label"] == "Fine-mapping"
+
+
+def test_branch_inherits_step_and_monitor_suggests_step(chain, proj, tmp_path):
+    from sciweave import monitor
+    proj.set_step([chain["tab"]], "gwas")
+    alt = write(tmp_path / "br" / "alt.tsv", "x\n")
+    b = proj.branch(chain["tab"], "alt", path=str(alt), why="test")
+    assert b["step"] == "gwas"
+    monitor.run_round(proj)
+    tdir = proj.resolve(proj.nodes[chain["tab"]]["path"]).parent
+    write(tdir / "lead_v9.tsv", "snp\n")
+    r = monitor.run_round(proj)
+    it = next(x for x in r["new"] if x["path"].endswith("lead_v9.tsv"))
+    assert it["step"] == "gwas"
