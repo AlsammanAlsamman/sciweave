@@ -16,6 +16,12 @@ def write(path: Path, text: str) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Never touch the real ~/Documents/SciWeave registry from tests."""
+    monkeypatch.setenv("SCIWEAVE_HOME", str(tmp_path / "sciweave-home"))
+
+
 @pytest.fixture
 def proj(tmp_path):
     return Project.init(tmp_path / "proj", name="Test")
@@ -446,3 +452,387 @@ def test_branch_inherits_step_and_monitor_suggests_step(chain, proj, tmp_path):
     r = monitor.run_round(proj)
     it = next(x for x in r["new"] if x["path"].endswith("lead_v9.tsv"))
     assert it["step"] == "gwas"
+
+
+def test_registry_register_get_unregister(tmp_path):
+    from sciweave import registry
+    a = Project.init(tmp_path / "a", name="SLE Hispanic GWAS")
+    b = Project.init(tmp_path / "b", name="SLE Hispanic GWAS")
+    ea, eb = registry.register(a), registry.register(b)
+    assert ea["id"] == "sle-hispanic-gwas" and eb["id"] == "sle-hispanic-gwas-2"
+    assert registry.register(a)["id"] == ea["id"]  # idempotent
+    assert registry.get(str(a.root))["id"] == ea["id"]
+    with pytest.raises(SciWeaveError):
+        registry.get("hispanic")  # ambiguous
+    index = (registry.home_dir() / "PROJECTS.md").read_text(encoding="utf-8")
+    assert str(a.root) in index and "sle-hispanic-gwas-2" in index
+    registry.unregister("sle-hispanic-gwas-2")
+    assert [e["id"] for e in registry.load()["projects"]] == ["sle-hispanic-gwas"]
+    assert b.root.exists()  # removing from the list never touches the folder
+
+
+def test_registry_summary(chain, proj):
+    from sciweave import registry
+    e = registry.register(proj)
+    sm = registry.summarize(e)
+    assert sm["nodes"] == 6 and sm["links"] == 5 and sm["missing"] is False
+    assert sm["categories"]["outputs"] == 4 and sm["last_activity"]
+    import shutil
+    shutil.rmtree(proj.root)
+    assert registry.summarize(e)["missing"] is True
+
+
+def test_cli_init_registers_and_projects(tmp_path, capsys):
+    from sciweave import registry
+    assert main(["init", str(tmp_path / "study"), "--name", "Study"]) == 0
+    assert main(["init", str(tmp_path / "quiet"), "--no-register"]) == 0
+    assert [e["id"] for e in registry.load()["projects"]] == ["study"]
+    assert main(["projects", "add", str(tmp_path / "quiet")]) == 0
+    capsys.readouterr()
+    assert main(["projects"]) == 0
+    out = capsys.readouterr().out
+    assert "study" in out and "quiet" in out
+    assert main(["projects", "rm", "quiet"]) == 0
+
+
+def test_home_server_routes_projects(chain, proj):
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from sciweave import registry
+    from sciweave.server import Handler
+    e = registry.register(proj)
+    Handler.project_root = None
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    try:
+        get = lambda u: urllib.request.urlopen(base + u).read().decode("utf-8")
+        assert "Your projects" in get("")
+        listing = json.loads(get("api/projects"))
+        assert listing["projects"][0]["id"] == e["id"] and listing["projects"][0]["nodes"] == 6
+        page = get(f"p/{e['id']}")  # redirected to the trailing-slash URL
+        assert 'class="home-link"' in page
+        assert len(json.loads(get(f"p/{e['id']}/api/graph"))["nodes"]) == 6
+        req = urllib.request.Request(base + "api/projects/add", method="POST",
+                                     data=json.dumps({"path": str(proj.root.parent / "new"), "create": True,
+                                                      "name": "New one"}).encode())
+        assert json.loads(urllib.request.urlopen(req).read())["id"] == "new-one"
+        assert (proj.root.parent / "new" / ".sciweave" / "graph.json").exists()
+    finally:
+        httpd.shutdown()
+        Handler.project_root = Path(".")
+
+
+def test_analysis_tree_import_and_numbering(proj):
+    guide = [
+        {"key": "raw", "title": "Raw & input data", "start": "2026-08-01", "children": [
+            {"key": "qc", "title": "QC", "history": [{"date": "2026-08-03", "text": "b"}, {"date": "2026-08-02", "text": "a"}]},
+            {"key": "pca", "title": "PCA", "params": {"n_pcs": 3}},
+        ]},
+        {"key": "gwas", "title": "Per-cohort GWAS", "children": [{"key": "gwas.rerun", "title": "Rerun"}]},
+    ]
+    assert proj.import_analyses(guide) == 5
+    proj.commit()
+    tree = proj.analysis_tree()
+    assert [(k, n) for k, n, _ in tree] == [("raw", "1"), ("qc", "1.1"), ("pca", "1.2"), ("gwas", "2"), ("gwas.rerun", "2.1")]
+    assert [h["text"] for h in proj.analyses["qc"]["history"]] == ["a", "b"]  # sorted by date
+    assert "Analysis history" in (proj.root / "SCIWEAVE.md").read_text(encoding="utf-8")
+    assert Project(proj.root).analyses["pca"]["params"] == {"n_pcs": 3}  # persisted
+    assert "analyses" in proj.payload()
+
+
+def test_analysis_rules(proj):
+    proj.set_analysis("a", title="A")
+    proj.set_analysis("b", title="B", parent="a")
+    with pytest.raises(SciWeaveError):
+        proj.set_analysis("a", parent="b")  # loop
+    with pytest.raises(SciWeaveError):
+        proj.set_analysis("c", parent="missing")
+    with pytest.raises(SciWeaveError):
+        proj.set_analysis("c", status="finished")
+    with pytest.raises(SciWeaveError):
+        proj.set_analysis("c", colour="red")
+    before = json.dumps(proj.analyses, sort_keys=True)
+    with pytest.raises(SciWeaveError):
+        proj.import_analyses([{"key": "x", "parent": "nowhere"}])
+    assert json.dumps(proj.analyses, sort_keys=True) == before  # all or nothing
+    proj.set_analysis("c", title="C", parent="b")
+    proj.remove_analysis("b")
+    assert proj.analyses["c"]["parent"] == "a"  # children move up
+
+
+def test_cli_analysis(tmp_path, capsys, monkeypatch, chain, proj):
+    monkeypatch.chdir(proj.root)
+    assert main(["analysis", "add", "raw", "Raw data", "--summary", "genotypes", "--start", "2026-08-01"]) == 0
+    assert main(["analysis", "add", "gwas", "GWAS", "-p", "n_pcs=3", "--status", "open"]) == 0
+    assert main(["analysis", "add", "gwas.fix", "Fix", "--parent", "gwas"]) == 0
+    assert main(["analysis", "log", "gwas", "reran", "with", "3", "PCs", "--date", "2026-09-01"]) == 0
+    assert main(["analysis", "link", "gwas", chain["ss"]]) == 0
+    assert main(["analysis", "done", "raw"]) == 0
+    assert main(["analysis", "set", "nope", "--title", "x"]) == 1
+    capsys.readouterr()
+    assert main(["analysis"]) == 0
+    out = capsys.readouterr().out
+    assert "2.1" in out and "1 organized" in out
+    assert main(["analysis", "show", "gwas"]) == 0
+    out = capsys.readouterr().out
+    assert "reran with 3 PCs" in out and "n_pcs=3" in out and "Fix" in out
+    g = tmp_path / "guide.json"
+    g.write_text(json.dumps({"analyses": [{"key": "only", "title": "Only one"}]}), encoding="utf-8")
+    assert main(["analysis", "import", str(g), "--replace"]) == 0
+    assert list(Project(proj.root).analyses) == ["only"]
+
+
+def test_import_flat_list_orders_among_siblings(proj):
+    flat = [{"key": "a", "title": "A"}, {"key": "a.1", "parent": "a"}, {"key": "b", "title": "B"},
+            {"key": "a.2", "parent": "a"}]
+    proj.import_analyses(flat)
+    assert proj.analyses["b"]["order"] == 2 and proj.analyses["a.2"]["order"] == 2
+    assert [n for _, n, _ in proj.analysis_tree()] == ["1", "1.1", "1.2", "2"]
+
+
+def test_analysis_refs_expand_to_current_numbers(proj):
+    proj.import_analyses([{"key": "a", "title": "Alpha"}, {"key": "b", "title": "Beta", "summary": "redone in @a; see @nope"}])
+    assert proj.expand_refs(proj.analyses["b"]["summary"]) == "redone in 1 “Alpha”; see @nope"
+    proj.set_analysis("a", order=5)  # reorder: the reference follows
+    assert "2 “Alpha”" in proj.expand_refs("@a")
+
+
+def test_focus_hiding_keeps_what_comes_next(chain, proj, tmp_path):
+    # cov -> PL1 -> sumstats -> table -> figure; PL1 also -> QC.  Hide the step that made the sumstats.
+    sc = proj.add_node("script", "run_gwas.py", path=str(write(tmp_path / "ext" / "run.py", "x")), mode="ref")
+    proj.link(sc["id"], chain["pl"], rel="feeds")
+    proj.import_analyses([{"key": "prep", "title": "Prep", "nodes": [chain["pl"]], "children": [{"key": "prep.sub"}]},
+                          {"key": "gwas", "title": "GWAS", "nodes": [chain["ss"]]}])
+    assert proj.hidden_nodes() == {}
+    proj.hide_analyses(["prep"])
+    hid = proj.hidden_nodes()
+    assert proj.hidden_analyses() == {"prep", "prep.sub"}  # branches go with it
+    assert chain["pl"] in hid and hid[chain["pl"]].startswith("part of hidden analysis")
+    assert chain["cov"] in hid and sc["id"] in hid           # only used by the hidden pipeline
+    assert chain["qc"] not in hid                            # an output with no consumers is not swept up
+    assert chain["ss"] not in hid and chain["tab"] not in hid  # the next analysis stays
+    proj.hide_nodes([chain["cov"]], hidden=False)             # pin one back
+    assert chain["cov"] not in proj.hidden_nodes()
+    proj.hide_analyses(["prep"], hidden=False)
+    assert proj.hidden_nodes() == {} and len(proj.nodes) == 7  # nothing was deleted
+    assert "hidden" in proj.payload()
+
+
+def test_cli_hide(tmp_path, capsys, monkeypatch, chain, proj):
+    monkeypatch.chdir(proj.root)
+    assert main(["analysis", "add", "prep", "Prep"]) == 0
+    assert main(["analysis", "add", "gwas", "GWAS"]) == 0
+    assert main(["analysis", "hide", "prep"]) == 0
+    capsys.readouterr()
+    assert main(["analysis"]) == 0
+    out = capsys.readouterr().out
+    assert "Prep" not in out and "1 hidden" in out
+    assert main(["analysis", "ls", "--all"]) == 0
+    assert "[hidden]" in capsys.readouterr().out
+    assert main(["hide", chain["fig"]]) == 0
+    assert chain["fig"] in Project(proj.root).hidden_nodes()
+    assert main(["unhide", chain["fig"]]) == 0
+    assert main(["status"]) == 0
+
+
+def test_analysis_rename_moves_branches_and_refs(proj):
+    proj.import_analyses([{"key": "input", "children": [{"key": "input.qc", "summary": "see @input.qc.x",
+                                                         "children": [{"key": "input.qc.x"}]}]},
+                          {"key": "gwas", "summary": "after @input.qc", "history": [{"date": "2026-01-01", "text": "@input.qc done"}]}])
+    m = proj.rename_analysis("input.qc", "prep.qc")
+    assert m == {"input.qc": "prep.qc", "input.qc.x": "prep.qc.x"}
+    assert proj.analyses["prep.qc.x"]["parent"] == "prep.qc" and proj.analyses["prep.qc"]["parent"] == "input"
+    assert proj.analyses["gwas"]["summary"] == "after @prep.qc"
+    assert proj.analyses["gwas"]["history"][0]["text"] == "@prep.qc done"
+    assert proj.analyses["prep.qc"]["summary"] == "see @prep.qc.x"
+    with pytest.raises(SciWeaveError):
+        proj.rename_analysis("gwas", "prep.qc")
+
+
+def test_order_zero_is_numbered_zero(proj):
+    proj.import_analyses([{"key": "before", "order": 0, "children": [{"key": "before.x"}]}, {"key": "input", "order": 1}, {"key": "gwas", "order": 2}])
+    assert [(k, n) for k, n, _ in proj.analysis_tree()] == [("before", "0"), ("before.x", "0.1"), ("input", "1"), ("gwas", "2")]
+
+
+def test_analysis_group_label_keeps_siblings_independent(tmp_path, capsys, monkeypatch, proj):
+    monkeypatch.chdir(proj.root)
+    assert main(["analysis", "add", "input", "Input"]) == 0
+    for k in ("lamr", "mex"):
+        assert main(["analysis", "add", f"input.{k}", k.upper(), "--parent", "input", "--group", "Hispanic cohorts"]) == 0
+    p = Project(proj.root)
+    assert [n for _, n, _ in p.analysis_tree()] == ["1", "1.1", "1.2"]  # siblings, not nested
+    assert p.analyses["input.mex"]["group"] == "Hispanic cohorts"
+    capsys.readouterr()
+    assert main(["analysis", "show", "input.lamr"]) == 0
+    assert "Hispanic cohorts" in capsys.readouterr().out
+
+
+def test_relocate_rewrites_paths_under_a_moved_folder(proj, tmp_path):
+    old = tmp_path / "old_place"
+    a = proj.add_node("raw", "Data", path=str(write(old / "sub" / "x.tsv", "a\n")), mode="ref")
+    b = proj.add_node("raw", "Other", path=str(write(tmp_path / "old_place_2" / "y.tsv", "b\n")), mode="ref")
+    proj.set_analysis("an", paths=[str(old / "sub"), "relative/path"])
+    new = tmp_path / "new_place"
+    dry = proj.relocate(str(old).replace("/", "\\"), str(new), dry_run=True)
+    assert len(dry) == 2 and proj.nodes[a["id"]]["path"].startswith(str(old))  # dry run writes nothing
+    proj.relocate(str(old), str(new))
+    assert proj.nodes[a["id"]]["path"].replace("\\", "/").endswith("new_place/sub/x.tsv")
+    assert "old_place_2" in proj.nodes[b["id"]]["path"]  # a sibling with the same prefix text is not touched
+    assert proj.analyses["an"]["paths"][1] == "relative/path"
+
+
+def test_organized_copies_follow_the_network(chain, proj, tmp_path):
+    dest = tmp_path / "organized"
+    with pytest.raises(SciWeaveError):
+        proj.organize(chain["tab"])  # no destination yet
+    proj.set_destination(str(dest))
+    proj.define_step("gwas", "Per-cohort GWAS", order=3)
+    proj.set_step([chain["tab"], chain["pl"]], "gwas")
+    rec = proj.organize(chain["tab"])
+    proj.commit()
+    assert rec["path"] == "03_Per-cohort_GWAS/lead.tsv" and (dest / rec["path"]).read_text() == "snp\nrs1\n"
+    proj.organize(chain["pl"])  # a folder-like pipeline file
+    assert proj.organized_state(chain["tab"]) == "ok"
+    # the network changes: a custom group -> the copy moves into a sub-folder, old folder cleaned up
+    proj.update_node(chain["tab"], groups=["METAL inputs"])
+    proj.commit()
+    moved = proj.nodes[chain["tab"]]["organized"]["path"]
+    assert moved == "03_Per-cohort_GWAS/METAL_inputs/lead.tsv" and (dest / moved).exists()
+    assert not (dest / "03_Per-cohort_GWAS/lead.tsv").exists()
+    # the source changes -> reported, and copying again refreshes it
+    write(Path(proj.resolve(proj.nodes[chain["tab"]]["path"])), "snp\nrs1\nrs2\n")
+    assert proj.organized_state(chain["tab"]) == "source_changed"
+    proj.organize(chain["tab"])
+    assert proj.organized_state(chain["tab"]) == "ok" and (dest / moved).read_text().endswith("rs2\n")
+    assert chain["tab"] in proj.payload()["organized"]
+
+
+def test_cli_destination_and_organize(tmp_path, capsys, monkeypatch, chain, proj):
+    monkeypatch.chdir(proj.root)
+    assert main(["destination", str(tmp_path / "dst")]) == 0
+    assert main(["organize", chain["fig"]]) == 0
+    assert main(["organize", "--all"]) == 0
+    assert main(["organize"]) == 0
+    capsys.readouterr()
+    assert main(["status"]) == 0
+    assert "organized copies" in capsys.readouterr().out
+
+
+def test_dedup_one_file_one_node(proj, tmp_path, capsys, monkeypatch):
+    from sciweave import dedup
+    blob = ("ACGT" * 3000) + "\n"  # > MIN_BYTES
+    a = write(tmp_path / "fizi" / "refpanel" / "g1000_eur.bed", blob)
+    b = write(tmp_path / "lynx" / "main1000.bed", blob)  # same bytes, other name and folder
+    write(tmp_path / "other" / "x.bed", blob[:-2] + "Z\n")  # same size, different content
+    na = proj.add_node("input", "1000G EUR (FIZI)", path=str(a.parent), mode="ref")
+    nb = proj.add_node("input", "1000G panel (LYNXgwas)", path=str(b), mode="ref")
+    nc = proj.add_node("input", "Other panel", path=str(tmp_path / "other" / "x.bed"), mode="ref")
+    t = proj.add_node("result", "Clumped loci", path=str(write(tmp_path / "loci.tsv", "l\n")), mode="ref")
+    proj.link(nb["id"], t["id"], rel="feeds")
+    proj.set_analysis("lynx", nodes=[nb["id"]])
+    r = dedup.scan(proj)
+    pairs = {tuple(sorted((x["a"], x["b"]))) for x in r["whole"]}
+    assert tuple(sorted((na["id"], nb["id"]))) in pairs                     # bit-identical, different names
+    assert all(nc["id"] not in pr for pr in pairs)                         # same size, other bytes: not a duplicate
+    assert dedup.check_new(proj, b)["same_as"] == sorted([na["id"], nb["id"]]) or nb["id"] in dedup.check_new(proj, b)["same_as"]
+    k = dedup.merge(proj, na["id"], nb["id"], label="1000 Genomes EUR (FIZI, LYNXgwas)", used_by=["FIZI", "LYNXgwas"])
+    proj.commit()
+    assert nb["id"] not in proj.nodes and k["label"] == "1000 Genomes EUR (FIZI, LYNXgwas)"
+    assert proj.edges[0]["source"] == na["id"]                             # the link moved to the kept node
+    assert proj.analyses["lynx"]["nodes"] == [na["id"]]
+    assert str(b) in k["meta"]["also_at"] and k["meta"]["used_by"] == ["FIZI", "LYNXgwas"]
+    # adding the same bytes again is refused (CLI) and flagged (plan check)
+    monkeypatch.chdir(proj.root)
+    assert main(["add", "input", "again", str(b)]) == 1
+    pl = {"sciweave_plan": 1, "nodes": [{"key": "dup", "type": "input", "label": "dup", "path": str(b), "mode": "ref", "step": None}]}
+    rep = plan.check(proj, pl)
+    assert any("identical content" in m for m in rep.errors)
+
+
+def test_large_data_is_held_back_and_a_no_is_remembered(tmp_path, capsys, monkeypatch, chain, proj):
+    monkeypatch.setattr(Project, "BIG_BYTES", -1)  # every file in the fixture counts as "large"
+    monkeypatch.chdir(proj.root)
+    assert main(["destination", str(tmp_path / "dst")]) == 0
+    capsys.readouterr()
+    assert main(["organize", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert "0 object(s) copied" in out and "large data" in out          # large data is never copied by --all
+    p = Project(proj.root)
+    p.set_organize_skip(chain["tab"]); p.commit()
+    assert Project(proj.root).nodes[chain["tab"]]["organize_skip"] is True
+    assert main(["organize", "--all", "--include-large"]) == 0         # copies the large ones, not the skipped one
+    p = Project(proj.root)
+    assert not p.nodes[chain["tab"]].get("organized") and p.nodes[chain["fig"]].get("organized")
+    assert main(["organize", chain["tab"]]) == 0                        # saving it on its own clears the skip
+    assert "organize_skip" not in Project(proj.root).nodes[chain["tab"]]
+
+
+def test_verified_copies_checksum_files_and_quick_check(chain, proj, tmp_path, capsys, monkeypatch):
+    import hashlib as _h
+    dest = tmp_path / "organized"
+    proj.set_destination(str(dest))
+    proj.define_step("gwas", "Per-cohort GWAS", order=3)
+    proj.set_step([chain["tab"], chain["pl"]], "gwas")
+    rec = proj.organize(chain["tab"]); proj.commit()
+    side = dest / rec["sidecar"]
+    digest, _, name = side.read_text(encoding="utf-8").strip().partition("  ")
+    assert name == "lead.tsv" and digest == _h.sha256((dest / rec["path"]).read_bytes()).hexdigest()
+    chk = proj.organized_check(chain["tab"])
+    assert chk["up_to_date"] and chk["has_checksum"]
+    assert proj.verify_copy(chain["tab"])["ok"]
+    # a folder copy: one checksum file listing every file
+    folder = tmp_path / "ext" / "pipe"
+    d = proj.add_node("result", "Pipeline folder", path=str(folder), mode="ref", step="gwas")
+    r2 = proj.organize(d["id"]); proj.commit()
+    lines = (dest / r2["sidecar"]).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == r2["files"] >= 3 and all("  " + r2["name"] + "/" in l for l in lines)
+    # the checksum file moves with its copy when the network changes
+    proj.update_node(chain["tab"], groups=["METAL inputs"]); proj.commit()
+    rec = proj.nodes[chain["tab"]]["organized"]
+    assert (dest / rec["sidecar"]).exists() and rec["sidecar"].startswith("03_Per-cohort_GWAS/METAL_inputs/")
+    # quick check sees a changed source (size differs)
+    write(Path(proj.resolve(proj.nodes[chain["tab"]]["path"])), "snp\nrs1\nrs2\nrs3\n")
+    chk = proj.organized_check(chain["tab"])
+    assert not chk["up_to_date"] and not chk["same_size"]
+    # a copy damaged at the destination is caught by verify
+    proj.organize(chain["tab"]); proj.commit()
+    (dest / proj.nodes[chain["tab"]]["organized"]["path"]).write_text("tampered\n", encoding="utf-8")
+    res = proj.verify_copy(chain["tab"])
+    assert not res["ok"] and res["bad"] == ["lead.tsv"]
+    # CLI: an up-to-date copy is not copied again without --force
+    proj.organize(chain["tab"]); proj.commit()
+    monkeypatch.chdir(proj.root); capsys.readouterr()
+    assert main(["organize", chain["tab"]]) == 0
+    assert "already up to date" in capsys.readouterr().out
+    assert main(["organize", "--verify", chain["tab"]]) == 0
+    assert "OK" in capsys.readouterr().out
+
+
+def test_jobs_interrupted_lock_and_clean(chain, proj, tmp_path, capsys, monkeypatch):
+    import time as _t
+    from sciweave import jobs
+    proj.set_destination(str(tmp_path / "dst")); proj.commit()
+    d = jobs.jobs_dir(proj)
+    # a job whose process stopped beating is reported as interrupted
+    jobs._write(d / "j1.json", {"id": "j1", "node": chain["tab"], "kind": "copy", "state": "copying",
+                                "heartbeat": _t.time() - 3600, "created": "x"})
+    assert [j["state"] for j in jobs.list_jobs(proj)] == ["interrupted"]
+    # the run() body copies, checks and records (here in-process)
+    jobs._write(d / "j2.json", {"id": "j2", "node": chain["fig"], "kind": "copy", "state": "queued",
+                                "heartbeat": _t.time(), "created": "y", "bytes_done": 0, "bytes_total": 0})
+    assert jobs.run(proj.root, "j2") == 0
+    j2 = jobs._read(d / "j2.json")
+    assert j2["state"] == "done" and j2["bytes_done"] == j2["bytes_total"] > 0
+    assert Project(proj.root).nodes[chain["fig"]].get("organized")
+    # the lock is exclusive and released
+    with jobs.graph_lock(proj.state):
+        assert (proj.state / "graph.lock").exists()
+    assert not (proj.state / "graph.lock").exists()
+    # leftovers of an interrupted copy are removed by --clean
+    (tmp_path / "dst" / "x.bin.sciweave-part").write_bytes(b"0" * 10)
+    (d / "j1.json").unlink()
+    monkeypatch.chdir(proj.root); capsys.readouterr()
+    assert main(["organize", "--clean"]) == 0
+    assert "removed 1" in capsys.readouterr().out and not (tmp_path / "dst" / "x.bin.sciweave-part").exists()

@@ -42,6 +42,10 @@ def get_project(args) -> Project:
 def cmd_init(args):
     p = Project.init(Path(args.path), name=args.name, description=args.description or "", bare=args.bare)
     print(f"initialised SciWeave project '{p.graph['project']['name']}' at {p.root}")
+    if not args.no_register:
+        from sciweave import registry
+        e = registry.register(p)
+        print(f"  listed in your SciWeave home as '{e['id']}' ({registry.home_dir()})")
     print("  next: sciweave add <type> <label> <path>   ·   sciweave article new \"Title\"   ·   sciweave serve")
 
 
@@ -57,6 +61,15 @@ def cmd_status(args):
         counts[n["type"]] = counts.get(n["type"], 0) + 1
     print(f"{g['name']}  ({p.root})")
     print(f"  {len(p.nodes)} nodes · {len(p.edges)} links · " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())))
+    if p.destination is not None:
+        org = {nid: p.organized_state(nid) for nid, n in p.nodes.items() if n.get("organized")}
+        changed = [nid for nid, s in org.items() if s != "ok"]
+        print(f"  destination: {p.destination}  ({len(org)} organized copies"
+              + (f"; needs attention: {', '.join(f'{k} {org[k]}' for k in changed)}" if changed else "") + ")")
+    hidden = p.hidden_nodes()
+    if hidden or p.hidden_analyses():
+        print(f"  focus: {len(p.hidden_analyses())} analyses and {len(hidden)} objects hidden from view "
+              "(`sciweave analysis ls --all`; nothing deleted)")
     bad = {k: v for k, v in st.items() if v["state"] != "ok"}
     if not bad:
         print("  everything up to date")
@@ -87,6 +100,12 @@ def cmd_ls(args):
 def cmd_add(args):
     p = get_project(args)
     mode = "managed" if args.copy else "ref" if args.ref else ("managed" if args.type in ("table", "figure", "supplement", "script", "section") else "ref")
+    if args.path and not args.allow_duplicate and Path(args.path).expanduser().exists():
+        from sciweave import dedup
+        same = dedup.check_new(p, Path(args.path).expanduser())["same_as"]
+        if same:  # one file, one node
+            raise SciWeaveError(f"identical content (bit by bit) is already in the network as {', '.join(same)}: link to "
+                                f"it instead (or --allow-duplicate)")
     n = p.add_node(args.type, args.label, path=args.path, mode=mode, dest=args.dest,
                    description=args.desc or "", groups=args.group or [], tags=args.tag or [],
                    node_id=args.id, message=args.message or "added", actor=args.actor, step=args.step)
@@ -299,6 +318,271 @@ def cmd_step(args):
                       + (f" | out to {outs}" if outs else ""))
 
 
+def _analysis_fields(args) -> dict:
+    f = {"title": args.title, "parent": args.parent, "order": args.order, "summary": args.summary, "group": args.group,
+         "status": args.status, "start": args.start, "end": args.end, "step": args.step_key,
+         "tools": args.tools, "feeds": args.feeds}
+    if args.parent == "none":
+        f["parent"] = ""
+    if args.paths:
+        f["paths"] = args.paths
+    if args.param:
+        f["params"] = parse_params(args.param)
+    if args.organized is not None:
+        f["organized"] = args.organized
+    return f
+
+
+def cmd_analysis(args):
+    p = get_project(args)
+    a = args.args
+    if args.action in ("add", "set"):
+        if not a:
+            raise SciWeaveError('usage: sciweave analysis add <key> ["title"] [--parent K] [--summary "..."] ...')
+        f = _analysis_fields(args)
+        if len(a) > 1:
+            f["title"] = a[1]
+        if args.action == "set" and a[0] not in p.analyses:
+            raise SciWeaveError(f"unknown analysis '{a[0]}' (use `analysis add` to create it)")
+        e = p.set_analysis(a[0], actor=args.actor, **f)
+        p.commit()
+        print(f"analysis {a[0]}: {e['title']}")
+    elif args.action == "log":
+        if len(a) < 2:
+            raise SciWeaveError('usage: sciweave analysis log <key> "what happened" [--date YYYY-MM-DD]')
+        ev = p.log_analysis(a[0], " ".join(a[1:]), date=args.date, actor=args.actor)
+        p.commit()
+        print(f"{a[0]}: {ev['date']} {ev['text']}")
+    elif args.action == "link":
+        if len(a) < 2:
+            raise SciWeaveError("usage: sciweave analysis link <key> <ID> [<ID> ...]")
+        cur = p.analysis(a[0]).get("nodes", [])
+        p.set_analysis(a[0], actor=args.actor, nodes=cur + [x for x in a[1:] if x not in cur])
+        p.commit()
+        print(f"{a[0]}: linked {', '.join(a[1:])}")
+    elif args.action == "done":  # shorthand: mark organized
+        for k in a:
+            p.set_analysis(k, actor=args.actor, organized=True)
+        p.commit()
+        print(f"organized: {', '.join(a)}")
+    elif args.action in ("hide", "unhide"):
+        if not a:
+            raise SciWeaveError(f"usage: sciweave analysis {args.action} <key> [<key> ...]")
+        done = p.hide_analyses(a, hidden=args.action == "hide", actor=args.actor)
+        p.commit()
+        hid = p.hidden_analyses()
+        print(f"{args.action}: {', '.join(done) if done else 'nothing changed'}  "
+              f"({len(hid)} analyses and {len(p.hidden_nodes())} objects hidden from view; nothing deleted)")
+    elif args.action == "rename":
+        if len(a) != 2:
+            raise SciWeaveError("usage: sciweave analysis rename <old-key> <new-key>   (branches old.* follow)")
+        m = p.rename_analysis(a[0], a[1], actor=args.actor)
+        p.commit()
+        print("renamed " + ", ".join(f"{k} → {v}" for k, v in m.items()))
+    elif args.action == "rm":
+        for k in a:
+            p.remove_analysis(k, actor=args.actor)
+        p.commit()
+        print(f"removed: {', '.join(a)}")
+    elif args.action == "import":
+        if len(a) != 1:
+            raise SciWeaveError("usage: sciweave analysis import <file.json> [--replace]")
+        data = json.loads(Path(a[0]).read_text(encoding="utf-8"))
+        n = p.import_analyses(data.get("analyses", data) if isinstance(data, dict) else data,
+                              replace=args.replace, actor=args.actor)
+        p.commit()
+        print(f"imported {n} analyses")
+    elif args.action == "show":
+        if len(a) != 1:
+            raise SciWeaveError("usage: sciweave analysis show <key>")
+        e = p.analysis(a[0])
+        num = {k: n for k, n, _ in p.analysis_tree()}.get(a[0], "")
+        print(f"{num} {e['title']}  ({a[0]})  · {e.get('status', '')}" + ("  · organized" if e.get("organized") else ""))
+        when = " → ".join(x for x in (e.get("start"), e.get("end")) if x)
+        if when:
+            print(f"  when:    {when}")
+        if e.get("parent"):
+            print(f"  part of: {e['parent']} · {p.analyses[e['parent']]['title']}")
+        for label, key in (("group", "group"), ("summary", "summary"), ("issue", "issue"), ("tools", "tools"),
+                           ("feeds", "feeds"), ("step", "step")):
+            if e.get(key):
+                print(f"  {label + ':':8} {p.expand_refs(str(e[key]))}")
+        if e.get("params"):
+            pr = e["params"]
+            print("  params:  " + (", ".join(f"{k}={v}" for k, v in pr.items()) if isinstance(pr, dict) else str(pr)))
+        for path in e.get("paths") or []:
+            print(f"  path:    {path}")
+        if e.get("nodes"):
+            print("  objects: " + ", ".join(f"{n} · {p.nodes[n]['label']}" for n in e["nodes"] if n in p.nodes))
+        kids = p.analysis_children(a[0])
+        if kids:
+            print("  branches: " + ", ".join(f"{k} · {p.analyses[k]['title']}" for k in kids))
+        if e.get("history"):
+            print("  history:")
+            for h in e["history"]:
+                print(f"    {h.get('date', ''):10}  {p.expand_refs(h.get('text', ''))}")
+    else:  # ls
+        tree = p.analysis_tree()
+        if not tree:
+            print("no analyses yet: sciweave analysis add raw \"Raw & input data\"  ·  sciweave analysis import guide.json")
+            return
+        hid = p.hidden_analyses()
+        for k, num, depth in tree:
+            if args.depth is not None and depth >= args.depth:
+                continue
+            if k in hid and not args.all:
+                continue
+            e = p.analyses[k]
+            when = " → ".join(x for x in (e.get("start"), e.get("end")) if x)
+            mark = "✓" if e.get("organized") else "·"
+            print(f"{mark} {'  ' * depth}{num:<7} {e['title'][:60]}  [{k}]" + (f"  {{{e['group']}}}" if e.get("group") else "")
+                  + (f"  {when}" if when else "")
+                  + ("" if e.get("status") == "done" else f"  ({e.get('status')})") + ("  [hidden]" if k in hid else ""))
+        shown = [k for k, _, _ in tree if k not in hid]
+        done = sum(1 for k in shown if p.analyses[k].get("organized"))
+        print(f"{len(shown)} analyses · {done} organized (✓)"
+              + (f" · {len(hid)} hidden ({'shown above' if args.all else 'ls --all to see them'})" if hid else ""))
+
+
+def cmd_hide(args):
+    p = get_project(args)
+    done = p.hide_nodes(args.ids, hidden=args.cmd == "hide", actor=args.actor)
+    p.commit()
+    print(f"{args.cmd}: {', '.join(done) if done else 'nothing changed'}  ({len(p.hidden_nodes())} objects hidden from view)")
+
+
+def cmd_destination(args):
+    p = get_project(args)
+    if args.path or args.clear:
+        d = p.set_destination(None if args.clear else args.path, actor=args.actor)
+        p.commit()
+        print(f"destination: {d}" if d else "destination cleared")
+    else:
+        print(p.destination or "no destination set (sciweave destination <folder>)")
+
+
+def cmd_organize(args):
+    p = get_project(args)
+    if args.clean:
+        from sciweave import jobs
+        running = [j for j in jobs.list_jobs(p) if j["state"] in jobs.RUNNING]
+        if running:
+            raise SciWeaveError(f"{len(running)} copy job(s) still running; clean up when they are done")
+        if p.destination is None:
+            raise SciWeaveError("no destination set")
+        gone, freed = [], 0
+        for x in sorted(p.destination.rglob("*")):
+            if x.name.endswith((".sciweave-part", ".sciweave-old")) and x.exists():
+                size = sum(f.stat().st_size for f in x.rglob("*") if f.is_file()) if x.is_dir() else x.stat().st_size
+                shutil.rmtree(x) if x.is_dir() else x.unlink()
+                gone.append(x)
+                freed += size
+        for x in gone:
+            print(f"  removed {x}")
+        print(f"removed {len(gone)} unfinished copy leftover(s), {freed / 1e9:.1f} GB freed")
+        return
+    ids = list(p.nodes) if args.all else args.ids
+    if not ids:
+        moved = p.sync_organized()
+        p.commit()
+        for nid, a, b in moved:
+            print(f"  {nid}: {a} -> {b}")
+        print(f"{len(moved)} organized copy(ies) moved to match the network")
+        return
+    done, held = 0, []
+    for nid in ids:
+        n = p.node(nid)
+        if args.all and not n.get("path"):
+            continue
+        if args.all and (n.get("organize_skip") or (p.is_big(nid) and not args.include_large)):
+            if p.organized_state(nid) != "ok":
+                held.append(f"{nid} ({(p.node_size(nid) or 0) / 1e9:.1f} GB{', skipped' if n.get('organize_skip') else ''})")
+            continue
+        state = p.organized_state(nid)
+        if args.verify:
+            res = p.verify_copy(nid)
+            p.record_verification(nid, res, actor=args.actor)
+            p.commit()
+            print(f"  {nid}: {'OK' if res['ok'] else 'PROBLEM'}  {res['message']}")
+            continue
+        if args.all and state == "ok":
+            continue
+        if not args.all and n.get("organized") and not args.force:
+            chk = p.organized_check(nid)
+            if chk["up_to_date"]:
+                print(f"  {nid}: already up to date (same size, source unchanged) — --force to copy again")
+                continue
+            print(f"  {nid}: source {chk['source_size']:,} bytes vs copy {chk['copy_size']:,} bytes"
+                  f"{' (source changed)' if chk['state'] == 'source_changed' else ''}: updating the copy")
+        rec = p.organize(nid, actor=args.actor)
+        p.commit()  # record each copy as soon as it is done
+        done += 1
+        print(f"  {nid} -> {p.destination}{'/'}{rec['path']}")
+    print(f"{done} object(s) copied to the destination")
+    if held:
+        print(f"not copied (large data, > 4 GB, or skipped): {', '.join(held)}  -> sciweave organize <ID>, or --include-large")
+
+
+def cmd_dedup(args):
+    from sciweave import dedup
+    p = get_project(args)
+    a = args.args
+    if args.action == "check":
+        if len(a) != 1:
+            raise SciWeaveError("usage: sciweave dedup check <path>")
+        r = dedup.check_new(p, Path(a[0]))
+        if r["same_as"]:
+            print(f"already in the network: identical content to {', '.join(r['same_as'])} — link to it, don't add it again")
+        elif r["overlaps"]:
+            print(f"shares identical files with {', '.join(r['overlaps'])} (partial overlap)")
+        else:
+            print("not in the network (no identical content found)")
+        return
+    if args.action == "merge":
+        if len(a) != 2:
+            raise SciWeaveError('usage: sciweave dedup merge <keep-ID> <duplicate-ID> [--label "..."] [--used-by A B]')
+        if not args.force:
+            r = dedup.scan(p)
+            pair = {tuple(sorted((x["a"], x["b"]))) for x in r["whole"]}
+            if tuple(sorted(a)) not in pair:
+                raise SciWeaveError(f"{a[0]} and {a[1]} are not bit-by-bit identical (use --force to merge anyway)")
+        k = dedup.merge(p, a[0], a[1], label=args.label, used_by=args.used_by, actor=args.actor)
+        p.commit()
+        print(f"merged {a[1]} into {k['id']} · {k['label']}  (also at: {', '.join(k['meta'].get('also_at', []))})")
+        return
+    r = dedup.scan(p)
+    if not r["whole"] and not r["partial"]:
+        print(f"no duplicated content among {len(p.nodes)} objects")
+        return
+    for x in r["whole"]:
+        print(f"  SAME CONTENT  {x['a']} · {p.nodes[x['a']]['label']}  ==  {x['b']} · {p.nodes[x['b']]['label']}"
+              f"   -> sciweave dedup merge {x['a']} {x['b']}")
+    for x in r["partial"]:
+        print(f"  overlap       {x['a']} and {x['b']} share {x['shared_files']} identical file(s)"
+              f" ({x['a_files']} vs {x['b_files']} files)")
+    for g in r["groups"][:args.limit]:
+        print(f"    {g['size']:>14,} bytes  sha256 {g['sha256'][:12]}  " + "  |  ".join(f"{o}: {Path(f).name}" for o, f in g["members"]))
+
+
+def cmd_job(args):
+    from sciweave import jobs
+    sys.exit(jobs.run(get_project(args).root, args.id))
+
+
+def cmd_relocate(args):
+    p = get_project(args)
+    ch = p.relocate(args.old, args.new, dry_run=args.dry_run, actor=args.actor)
+    for where, a, b in ch[:50]:
+        print(f"  {where}: {a}\n      -> {b}")
+    if len(ch) > 50:
+        print(f"  ... and {len(ch) - 50} more")
+    if args.dry_run:
+        print(f"{len(ch)} path(s) would change (dry run; nothing written)")
+        return
+    p.commit()
+    print(f"relocated {len(ch)} path(s)")
+
+
 def cmd_branch(args):
     p = get_project(args)
     if args.action == "new":
@@ -420,8 +704,55 @@ def cmd_ask(args):
 
 
 def cmd_serve(args):
+    from sciweave import registry
     from sciweave.server import serve
-    serve(get_project(args), port=args.port, open_browser=not args.no_browser)
+    p = get_project(args)
+    registry.register(p)  # so it also shows on the home page (`sciweave open`)
+    serve(p, port=args.port, open_browser=not args.no_browser)
+
+
+def cmd_open(args):
+    """The home dashboard: every registered project, each one clickable."""
+    from sciweave import registry
+    from sciweave.server import serve
+    start = ""
+    if args.name:
+        start = f"p/{registry.get(args.name)['id']}/"
+    elif args.project:  # `sciweave -C <path> open` opens that project inside the home
+        start = f"p/{registry.register(get_project(args))['id']}/"
+    serve(None, port=args.port, open_browser=not args.no_browser, start=start)
+
+
+def cmd_projects(args):
+    from sciweave import registry
+    if args.action == "where":
+        print(registry.home_dir())
+        return
+    if args.action == "add":
+        if not args.target:
+            raise SciWeaveError("projects add expects a project folder")
+        e = registry.register(Project.find(Path(args.target)))
+        print(f"listed '{e['name']}' as '{e['id']}' -> {e['path']}")
+        return
+    if args.action == "rm":
+        if not args.target:
+            raise SciWeaveError("projects rm expects a project id or name")
+        e = registry.unregister(args.target)
+        print(f"removed '{e['id']}' from the list (folder untouched: {e['path']})")
+        return
+    reg = registry.load()
+    if args.json:
+        print(json.dumps([registry.summarize(e) for e in reg["projects"]], indent=2, ensure_ascii=False))
+        return
+    print(f"SciWeave home: {registry.home_dir()}")
+    if not reg["projects"]:
+        print("  no projects yet: sciweave init <folder>  ·  sciweave projects add <folder>")
+    w = max((len(e["id"]) for e in reg["projects"]), default=0)
+    for e in reg["projects"]:
+        sm = registry.summarize(e, check_disk=False)
+        info = "folder not found" if sm.get("missing") else f"{sm['nodes']} objects · {sm['links']} links"
+        print(f"  {e['id']:{w}}  {e['name']}  ({info})")
+        print(f"  {'':{w}}  {e['path']}")
 
 
 def cmd_export(args):
@@ -480,6 +811,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--description")
     s.add_argument("--bare", action="store_true",
                    help="adopt an existing project in place: add only .sciweave/ and SCIWEAVE.md, no folders")
+    s.add_argument("--no-register", action="store_true", help="don't list it in your SciWeave home")
+
+    for name in ("open", "dashboard"):
+        s = cmd(name, cmd_open, "home dashboard: all your projects, pick one to open"
+                + ("" if name == "open" else " (same as `open`)"))
+        s.add_argument("name", nargs="?", help="open this project directly (id or name)")
+        s.add_argument("--port", type=int, default=8765)
+        s.add_argument("--no-browser", action="store_true")
+
+    s = cmd("projects", cmd_projects, "list / add / remove projects in your SciWeave home")
+    s.add_argument("action", nargs="?", default="ls", choices=["ls", "add", "rm", "where"])
+    s.add_argument("target", nargs="?", help="folder (add) or id/name (rm)")
+    s.add_argument("--json", action="store_true")
 
     s = cmd("status", cmd_status, "what is stale, modified or missing")
     s.add_argument("--json", action="store_true")
@@ -497,6 +841,7 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--copy", action="store_true", help="copy into the project and snapshot versions (managed)")
     m.add_argument("--ref", action="store_true", help="reference in place, fingerprint only")
     s.add_argument("--dest", help="where to copy inside the project (default: type folder)")
+    s.add_argument("--allow-duplicate", action="store_true", help="add even if identical content is already in the network")
     s.add_argument("--desc")
     s.add_argument("--group", action="append")
     s.add_argument("--tag", action="append")
@@ -592,6 +937,66 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("args", nargs="*", help='define: key "label" · set: key ID [ID ...] · ls')
     s.add_argument("--order", type=int, help="position of the step in the analysis (1, 2, 3 ...)")
     s.add_argument("--desc")
+
+    s = cmd("analysis", cmd_analysis,
+            "the analysis history (a guide tree): ls / show / add / set / log / link / done / rm / import")
+    s.add_argument("action", nargs="?", default="ls",
+                   choices=["ls", "show", "add", "set", "log", "link", "done", "hide", "unhide", "rename", "rm", "import"])
+    s.add_argument("args", nargs="*", help='add/set: key ["title"] · log: key "text" · link: key IDs · '
+                                           'done/rm: keys · import: file.json · show: key')
+    s.add_argument("--title")
+    s.add_argument("--parent", help="key of the analysis this one belongs under ('none' = top level)")
+    s.add_argument("--order", type=int, help="position among its siblings")
+    s.add_argument("--summary", help="what was done and why, the key result (1-3 sentences)")
+    s.add_argument("--status", choices=["done", "open", "superseded", "planned"])
+    s.add_argument("--start", help="first day worked on (YYYY-MM-DD)")
+    s.add_argument("--end", help="last day worked on (YYYY-MM-DD)")
+    s.add_argument("--step", dest="step_key", help="the network step it belongs to")
+    s.add_argument("--tools")
+    s.add_argument("--group", help='a label shared by independent siblings, e.g. "Hispanic cohorts" (not a parent)')
+    s.add_argument("--feeds", help="article items it feeds, e.g. 'Figure 2, ST4'")
+    s.add_argument("--paths", nargs="+")
+    s.add_argument("-p", "--param", action="append", help="key=value (result-changing parameter)")
+    s.add_argument("--organized", dest="organized", action="store_true", default=None)
+    s.add_argument("--not-organized", dest="organized", action="store_false")
+    s.add_argument("--date", help="log: date of the event (default today)")
+    s.add_argument("--replace", action="store_true", help="import: replace the whole tree")
+    s.add_argument("--depth", type=int, help="ls: show only this many levels")
+    s.add_argument("--all", action="store_true", help="ls: include hidden analyses")
+
+    s = cmd("destination", cmd_destination, "show or set the folder where organized copies live")
+    s.add_argument("path", nargs="?")
+    s.add_argument("--clear", action="store_true")
+
+    s = cmd("organize", cmd_organize,
+            "copy objects to the destination in folders matching the network (no ids: move copies to match)")
+    s.add_argument("ids", nargs="*")
+    s.add_argument("--all", action="store_true", help="every object with a file that has no up-to-date copy (large data excluded)")
+    s.add_argument("--force", action="store_true", help="copy again even if the copy is up to date")
+    s.add_argument("--clean", action="store_true", help="remove leftovers of interrupted copies (*.sciweave-part / -old)")
+    s.add_argument("--verify", action="store_true", help="re-read copies and check them against their checksum files")
+    s.add_argument("--include-large", action="store_true", help="--all: also copy objects over 4 GB (not those you skipped)")
+
+    s = cmd("dedup", cmd_dedup, "one file, one node: find identical content (scan), check a path, merge duplicates")
+    s.add_argument("action", nargs="?", default="scan", choices=["scan", "check", "merge"])
+    s.add_argument("args", nargs="*", help="check: path · merge: KEEP-ID DUPLICATE-ID")
+    s.add_argument("--label", help="merge: new label for the kept node, e.g. '1000 Genomes EUR (FIZI, LYNXgwas)'")
+    s.add_argument("--used-by", nargs="+", help="merge: tools / analyses that use it")
+    s.add_argument("--force", action="store_true", help="merge even if the content is not identical")
+    s.add_argument("--limit", type=int, default=30, help="scan: how many identical-file groups to list")
+
+    s = cmd("job", cmd_job, "(internal) run one background copy / verification job; started by the dashboard")
+    s.add_argument("id")
+
+    s = cmd("relocate", cmd_relocate, "data moved: rewrite node and analysis paths under OLD to NEW")
+    s.add_argument("old", help="the folder's previous location")
+    s.add_argument("new", help="its new location")
+    s.add_argument("--dry-run", action="store_true")
+
+    s = cmd("hide", cmd_hide, "hide objects from view (focus); nothing is deleted. `unhide` brings them back")
+    s.add_argument("ids", nargs="+")
+    s = cmd("unhide", cmd_hide, "show hidden objects again (also pins them visible inside a hidden analysis)")
+    s.add_argument("ids", nargs="+")
 
     s = cmd("branch", cmd_branch, "alternative versions of an analysis: new / main / alternative / abandoned / ls")
     s.add_argument("action", choices=["new", "main", "alternative", "abandoned", "ls"])

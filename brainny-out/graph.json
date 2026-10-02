@@ -40,6 +40,165 @@
       "novelty": null,
       "recurrence": 1,
       "last_touched": "2026-09-28T16:05:06+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "Headless Chrome enforces a ~500px minimum window width, so narrow --window-size screenshots show fake overflow",
+      "summary": "A --window-size=420,... headless screenshot lays the page out at Chrome's minimum width (~500px) and crops it, so a responsive page looks cut off on the right even when it fits. Verify phone layouts at >=500px or with real device emulation (DevTools / Puppeteer setViewport) before 'fixing' overflow that isn't there.",
+      "detail": null,
+      "domain": "web / visual verification",
+      "tags": [
+        "headless-chrome",
+        "screenshot",
+        "responsive",
+        "css"
+      ],
+      "trigger": "checking a page's mobile/phone layout with headless Chrome or Edge --screenshot at a width under ~500px",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0002",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-09-30T20:34:59+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-09-30T20:34:59+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-09-30T20:34:59+00:00"
+    },
+    {
+      "kind": "technique",
+      "title": "Reconstruct a project's analysis history from two independent sources in parallel: files on disk and Claude session transcripts",
+      "summary": "To rebuild what was done in a long analysis project, run two read-only agents at once: one mines the folder (README tracker logs, config snapshots, QC reports, file mtimes), the other mines ~/.claude/projects/*.jsonl transcripts (condensed to user+assistant text). They cover different things: the file scan gives the canonical outputs, parameters and article mapping; the transcripts give pre-folder work (e.g. months-earlier legacy runs), dead ends, and dated bug fixes that left no file. Merge them into one tree with a fixed output shape ([id] title (dates) · status / summary / params / paths / feeds / history).",
+      "detail": "Ask both agents for the same indented markdown schema so it can be parsed mechanically into an import JSON; refer between entries by stable keys (@key) rather than position numbers, since merging reorders the tree.",
+      "domain": "research provenance / project archaeology",
+      "tags": [
+        "claude-code",
+        "transcripts",
+        "provenance",
+        "subagents",
+        "history"
+      ],
+      "trigger": null,
+      "origin": "collaborative",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0003",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-09-30T21:01:37+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-09-30T21:01:37+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-09-30T21:01:37+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "Same reference-panel file name across tools does not mean same content: compare bytes before merging",
+      "summary": "In the SLE project, FIZI (ssimpsmake/resources/refpanel/g1000_eur.bed, 2.86 GB) and LYNXgwas (refpanels/eur/g1000_eur.bed, 1.25 GB) share file names but are different panels, while LYNXgwas refpanels/{eur,eas,amr} are bit-identical to mrmegask ref_panels/suprefpanels/{eur,eas,amr}. Deduplicating or documenting 'which panel was used' by name would have merged the wrong pair and missed the right one.",
+      "detail": "Match by size first (free), then SHA-256 only equal-size files; record one node per identical file set with also_at locations and used_by tools. Implemented as sciweave dedup (scan / check / merge) and enforced in plan check.",
+      "domain": "bioinformatics provenance / reference data",
+      "tags": [
+        "reference-panel",
+        "1000genomes",
+        "dedup",
+        "sha256",
+        "provenance"
+      ],
+      "trigger": "recording or reusing reference panels / annotation files that appear in several pipelines' folders, or deciding two tools 'used the same panel'",
+      "origin": "collaborative",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0004",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-10-01T22:54:30+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-10-01T22:54:30+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-01T22:54:30+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "On Windows, atomic save via os.replace fails (WinError 5) while another thread/process has the file open: retry briefly",
+      "summary": "A local dashboard server re-reads graph.json constantly; a background job saving it with write-temp + os.replace intermittently failed with PermissionError [WinError 5] Access is denied (about 1 in 4 stress runs). POSIX allows replacing an open file, Windows does not. Wrap the replace, the .bak copy and the read in a short retry loop (e.g. 40 x 50 ms), and give each writer its own temp file name (pid + thread id) so concurrent saves never share one.",
+      "detail": "Same session: a job registry dict read by polling requests while worker threads add/update jobs raised 'dictionary changed size during iteration' -- guard adds/updates with a lock and iterate over a snapshot copy.",
+      "domain": "python / Windows file I/O / threaded local servers",
+      "tags": [
+        "windows",
+        "os.replace",
+        "PermissionError",
+        "threading",
+        "atomic-write"
+      ],
+      "trigger": "writing a file with temp + os.replace on Windows while a server or another process may be reading it, or iterating a shared dict that background threads modify",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0005",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-10-01T23:41:28+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "9a4a1284-b916-4f62-966e-514d0b3b0b5a",
+          "ts": "2026-10-01T23:41:28+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-01T23:41:28+00:00"
     }
   ]
 }

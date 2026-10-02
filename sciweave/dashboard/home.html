@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projects · SciWeave</title>
+<link rel="icon" type="image/png" href="__LOGO__">
+<script>
+  try { var t = localStorage.getItem('sciweave-theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch (e) {}
+</script>
+<style>
+__CSS__
+/* ---- home page (sciweave open) ---- */
+body { overflow: auto; }
+.home { max-width: 1180px; width: 100%; margin: 0 auto; padding: 28px 16px 60px; }
+.hero { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.hero h1 { margin: 0; font-size: 26px; letter-spacing: -0.2px; }
+.hero p { margin: 4px 0 0; color: var(--text-2); }
+.hero .where { font-size: 12px; color: var(--text-3); margin-top: 6px; word-break: break-all; }
+.totals { display: flex; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 8px 14px; min-width: 92px; }
+.tile .n { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile .l { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.5px; }
+.grid-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); gap: 14px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px 16px 12px;
+  display: flex; flex-direction: column; gap: 10px; cursor: pointer; text-decoration: none; color: inherit;
+  transition: border-color .15s, box-shadow .15s, transform .15s; position: relative;
+}
+.card:hover, .card:focus-visible { border-color: var(--accent); box-shadow: var(--shadow); transform: translateY(-1px); outline: none; }
+.card.gone { cursor: default; opacity: 0.7; }
+.card.gone:hover { border-color: var(--border); box-shadow: none; transform: none; }
+.card { min-width: 0; }
+.card .top { display: flex; gap: 12px; align-items: flex-start; }
+.mono-tile {
+  width: 40px; height: 40px; border-radius: 10px; flex: none; display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 15px; color: #fff; background: var(--accent);
+}
+.card h2 { margin: 0; font-size: 16px; line-height: 1.3; }
+.card .desc { color: var(--text-2); font-size: 13px; margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card .path { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stats { display: flex; gap: 14px; font-size: 12.5px; color: var(--text-2); flex-wrap: wrap; }
+.stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+.bar { display: flex; height: 6px; border-radius: 99px; overflow: hidden; background: var(--surface-2); }
+.bar span { display: block; height: 100%; }
+.steps { display: flex; gap: 4px; flex-wrap: wrap; font-size: 11px; }
+.steps .s { padding: 1px 7px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); }
+.card .foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-3); }
+.card .foot .open { margin-left: auto; color: var(--accent); font-weight: 600; font-size: 13px; }
+.state { font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
+.state.ok { border-color: var(--edge-plain); color: var(--text); }
+.state.stale { border-color: var(--stale); color: var(--text); }
+.state.modified { border-style: dashed; border-color: var(--text-3); }
+.state.missing { border-color: var(--edge-params); color: var(--text); }
+.linkish { background: none; border: none; padding: 0; color: var(--text-3); cursor: pointer; font-size: 12px; text-decoration: underline; }
+.linkish:hover { color: var(--edge-params); }
+.empty { text-align: center; padding: 60px 20px; color: var(--text-2); background: var(--surface); border: 1px dashed var(--border); border-radius: 14px; }
+.empty code { background: var(--surface-2); padding: 2px 6px; border-radius: 6px; }
+.modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 30; padding: 16px; }
+.modal-bg.open { display: flex; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); width: min(560px, 100%); padding: 18px; }
+.modal h3 { margin: 0 0 4px; font-size: 16px; }
+.modal p { margin: 0 0 12px; font-size: 13px; color: var(--text-2); }
+.modal label { display: block; font-size: 12px; color: var(--text-3); margin: 10px 0 4px; }
+.modal input[type=text] { width: 100%; border: 1px solid var(--border); background: var(--surface-2); border-radius: 9px; padding: 7px 10px; outline: none; }
+.modal input[type=text]:focus { border-color: var(--accent); }
+.modal .check { display: flex; gap: 8px; align-items: flex-start; color: var(--text-2); font-size: 13px; margin-top: 10px; }
+.modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.modal .err { color: var(--edge-params); font-size: 12.5px; margin-top: 8px; min-height: 1em; }
+@media (max-width: 600px) {
+  .search { min-width: 0; flex: 1 1 140px; } .totals { margin-left: 0; } .tile { min-width: 0; flex: 1 1 40%; }
+  .brand .proj { display: none; } .hero .where { display: none; }
+}
+.dest { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 10px; border-radius: 9px; border: 1px dashed var(--border);
+  overflow: hidden; white-space: nowrap; }
+.dest:hover { border-color: var(--accent); }
+.dest .mono { overflow: hidden; text-overflow: ellipsis; }
+.dest-k { font-weight: 600; color: var(--text-2); }
+.dest .dest-open { color: var(--accent); text-decoration: none; font-weight: 600; flex: none; }
+.dest .go { margin-left: auto; color: var(--accent); }
+.guide-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 7px 10px; border-radius: 9px;
+  background: var(--surface-2); border: 1px solid var(--border); }
+.guide-line:hover { border-color: var(--accent); }
+.guide-line .gbar { flex: 1; height: 6px; border-radius: 99px; background: var(--surface); overflow: hidden; border: 1px solid var(--border); }
+.guide-line .gbar span { display: block; height: 100%; background: var(--edge-plain); }
+.guide-line .go { color: var(--accent); font-weight: 700; }
+.card .hint { font-size: 12.5px; color: var(--text-2); background: var(--surface-2); border-radius: 9px; padding: 8px 10px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <img src="__LOGO__" alt="" width="28" height="28" style="border-radius:7px">
+    SciWeave <span class="proj">· Projects</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+    <input id="filter" placeholder="Filter projects…" autocomplete="off">
+  </div>
+  <button class="btn primary" id="add-btn">+ Add project</button>
+  <button class="icon-btn" id="refresh-btn" title="Refresh">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+  </button>
+  <button class="icon-btn" id="theme-toggle" title="Light / dark">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+  </button>
+</header>
+
+<div class="home">
+  <div class="hero">
+    <div>
+      <h1>Your projects</h1>
+      <p>Every figure, table and result, and how it was made. Pick a project to open its network.</p>
+      <div class="where mono" id="where"></div>
+    </div>
+    <div class="totals" id="totals"></div>
+  </div>
+  <div class="grid-cards" id="cards"><div class="muted">Loading…</div></div>
+</div>
+
+<div class="modal-bg" id="modal">
+  <form class="modal" id="add-form">
+    <h3>Add a project</h3>
+    <p>Point at a folder. If it is already a SciWeave project it is added to this list; otherwise tick “create” to start one there. Nothing is moved.</p>
+    <label for="f-path">Folder (full path)</label>
+    <input type="text" id="f-path" placeholder="C:\Users\me\Documents\my-study" autocomplete="off" required>
+    <label for="f-name">Name (for a new project; optional)</label>
+    <input type="text" id="f-name" placeholder="defaults to the folder name" autocomplete="off">
+    <div class="check"><input type="checkbox" id="f-create"><label for="f-create" style="margin:0;color:inherit;font-size:inherit">Create a new SciWeave project here if there isn’t one</label></div>
+    <div class="check"><input type="checkbox" id="f-bare"><label for="f-bare" style="margin:0;color:inherit;font-size:inherit">Adopt an existing analysis folder in place: add only <code>.sciweave/</code> and <code>SCIWEAVE.md</code>, no new folders</label></div>
+    <div class="err" id="f-err"></div>
+    <div class="row">
+      <button class="btn" type="button" id="f-cancel">Cancel</button>
+      <button class="btn primary" type="submit">Add</button>
+    </div>
+  </form>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  var PROJECTS = [];
+  var cardsEl = document.getElementById('cards');
+  var filterEl = document.getElementById('filter');
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function toast(msg) {
+    var t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block';
+    clearTimeout(toast._t); toast._t = setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+  function ago(iso) {
+    if (!iso) return 'no activity yet';
+    var s = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (isNaN(s)) return '';
+    if (s < 90) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    if (s < 86400 * 30) return Math.round(s / 86400) + ' days ago';
+    return new Date(iso).toLocaleDateString();
+  }
+  function initials(name) {
+    var w = String(name).replace(/[^A-Za-z0-9 ]+/g, ' ').trim().split(/\s+/);
+    return ((w[0] || '?').charAt(0) + (w[1] ? w[1].charAt(0) : '')).toUpperCase();
+  }
+  function post(url, body) {
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (res) { if (res.error) throw new Error(res.error); return res; });
+  }
+
+  // category shares for the composition bar (same hues as the network)
+  var CATS = ['sources', 'resources', 'process', 'outputs', 'writing', 'notes'];
+
+  var TILE = ['var(--cat-sources)', 'var(--cat-outputs)', 'var(--cat-process)', 'var(--cat-writing)'];
+  function tileColor(id) { var h = 0; for (var i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0; return TILE[h % TILE.length]; }
+
+  function card(p) {
+    if (p.missing) {
+      return '<div class="card gone" data-id="' + esc(p.id) + '"><div class="top"><div class="mono-tile" style="background:var(--text-3)">' + esc(initials(p.name)) + '</div>' +
+        '<div style="min-width:0"><h2>' + esc(p.name) + '</h2><div class="path mono" title="' + esc(p.path) + '">' + esc(p.path) + '</div></div></div>' +
+        '<div><span class="state missing">folder not found</span> <span class="muted" style="font-size:12px">moved or deleted? Add it again from its new place.</span></div>' +
+        '<div class="foot"><button class="linkish" data-remove="' + esc(p.id) + '">Remove from list</button></div></div>';
+    }
+    var t = p.types || {}, st = p.status || {};
+    var total = p.nodes || 0;
+    var cats = p.categories || {};
+    var bar = total ? CATS.map(function (c) {
+      var n = cats[c] || 0; return n ? '<span title="' + c + ': ' + n + '" style="width:' + (100 * n / total) + '%;background:var(--cat-' + c + ')"></span>' : '';
+    }).join('') : '';
+    var states = [];
+    if (st.stale) states.push('<span class="state stale">' + st.stale + ' stale</span>');
+    if (st.modified) states.push('<span class="state modified">' + st.modified + ' modified</span>');
+    if (st.missing) states.push('<span class="state missing">' + st.missing + ' missing</span>');
+    if (!states.length) states.push('<span class="state ok">' + (total ? 'up to date' : 'empty') + '</span>');
+    var steps = (p.steps || []);
+    var stepHtml = steps.length ? '<div class="steps">' + steps.slice(0, 8).map(function (s, i) { return '<span class="s">' + (i + 1) + '. ' + esc(s) + '</span>'; }).join('') +
+      (steps.length > 8 ? '<span class="s">+' + (steps.length - 8) + '</span>' : '') + '</div>' : '';
+    return '<a class="card" href="p/' + encodeURIComponent(p.id) + '/" data-id="' + esc(p.id) + '">' +
+      '<div class="top"><div class="mono-tile" style="background:' + tileColor(p.id) + '">' + esc(initials(p.name)) + '</div>' +
+      '<div style="min-width:0;flex:1"><h2>' + esc(p.name) + '</h2>' +
+      (p.description ? '<div class="desc">' + esc(p.description) + '</div>' : '') +
+      '<div class="path mono" title="' + esc(p.path) + '">' + esc(p.path) + '</div></div></div>' +
+      '<div class="dest" data-dest="' + esc(p.id) + '" title="Where this project\'s organized copies live (folders mirror the network). Click to change.">' +
+      '<span class="dest-k">Destination</span>' + (p.destination ? '<span class="mono">' + esc(p.destination) + '</span><span class="muted">· ' + (p.copies || 0) + ' copied</span>' +
+        '<button class="linkish dest-open" data-reveal="' + esc(p.id) + '" title="Open this folder in File Explorer">open</button>'
+        : '<span class="muted">not set · click to choose a folder</span>') + '<span class="go">✎</span></div>' +
+      '<div class="stats"><span><b>' + total + '</b> objects</span><span><b>' + (p.links || 0) + '</b> links</span>' +
+      '<span><b>' + ((t.figure || 0)) + '</b> figures</span><span><b>' + ((t.table || 0)) + '</b> tables</span>' +
+      '<span><b>' + steps.length + '</b> steps</span>' +
+      (p.analyses ? '<span><b>' + p.analyses + '</b> analyses</span>' : '') + '</div>' +
+      (p.analyses ? '<div class="guide-line" data-guide="' + esc(p.id) + '" title="Open the analysis history"><span>Analysis history</span>' +
+        '<span class="gbar"><span style="width:' + (100 * (p.organized || 0) / p.analyses) + '%"></span></span>' +
+        '<span class="muted">' + (p.organized || 0) + ' / ' + p.analyses + ' organized</span><span class="go">›</span></div>' : '') +
+      (bar ? '<div class="bar">' + bar + '</div>' : '') +
+      stepHtml +
+      (total || p.analyses ? '' : '<div class="hint">Empty so far. Define the analysis steps and add results one step at a time, or ask Claude: <i>“add the GWAS step to SciWeave”</i>.</div>') +
+      '<div class="foot">' + states.join(' ') + '<span>· ' + esc(ago(p.last_activity)) + '</span>' +
+      '<button class="linkish" data-remove="' + esc(p.id) + '" title="Remove from this list (the folder is not touched)">remove</button>' +
+      '<span class="open">Open →</span></div></a>';
+  }
+
+  function render() {
+    var q = filterEl.value.trim().toLowerCase();
+    var list = PROJECTS.filter(function (p) {
+      return !q || (p.name + ' ' + p.id + ' ' + p.path + ' ' + (p.description || '') + ' ' + (p.steps || []).join(' ')).toLowerCase().indexOf(q) >= 0;
+    });
+    list.sort(function (a, b) { return (b.last_activity || '').localeCompare(a.last_activity || '') || a.name.localeCompare(b.name); });
+    if (!PROJECTS.length) {
+      cardsEl.innerHTML = '<div class="empty" style="grid-column:1/-1"><h3 style="margin-top:0">No projects yet</h3>' +
+        '<p>Start one with <code>sciweave init &lt;folder&gt;</code>, adopt one with <code>sciweave projects add &lt;folder&gt;</code>,<br>or use <b>+ Add project</b> above.</p></div>';
+    } else if (!list.length) {
+      cardsEl.innerHTML = '<div class="muted">No project matches “' + esc(q) + '”.</div>';
+    } else {
+      cardsEl.innerHTML = list.map(card).join('');
+    }
+    var live = PROJECTS.filter(function (p) { return !p.missing; });
+    var tot = function (f) { return live.reduce(function (n, p) { return n + f(p); }, 0); };
+    var tiles = [
+      [PROJECTS.length, 'projects'],
+      [tot(function (p) { return p.nodes || 0; }), 'objects'],
+      [tot(function (p) { return (p.types && (p.types.figure || 0) + (p.types.table || 0)) || 0; }), 'figures + tables'],
+      [tot(function (p) { return (p.status && p.status.stale) || 0; }), 'stale']
+    ];
+    document.getElementById('totals').innerHTML = tiles.map(function (t) {
+      return '<div class="tile"><div class="n">' + t[0].toLocaleString() + '</div><div class="l">' + t[1] + '</div></div>';
+    }).join('');
+  }
+
+  function loadProjects() {
+    return fetch('api/projects').then(function (r) { return r.json(); }).then(function (d) {
+      PROJECTS = d.projects || [];
+      document.getElementById('where').textContent = 'Registry: ' + d.home + '  ·  sciweave open · sciweave projects';
+      render();
+    }).catch(function () { cardsEl.innerHTML = '<div class="muted">Could not load projects. Is <code>sciweave open</code> still running?</div>'; });
+  }
+
+  cardsEl.addEventListener('click', function (ev) {
+    var rv = ev.target.closest('[data-reveal]');
+    if (rv) {
+      ev.preventDefault(); ev.stopPropagation();
+      post('api/projects/reveal', { id: rv.getAttribute('data-reveal') }).then(function (r) { toast(r.message); })
+        .catch(function (e) { toast(e.message); });
+      return;
+    }
+    var ds = ev.target.closest('[data-dest]');
+    if (ds) {
+      ev.preventDefault(); ev.stopPropagation();
+      var id = ds.getAttribute('data-dest'), cur = (PROJECTS.filter(function (x) { return x.id === id; })[0] || {}).destination || '';
+      var d = prompt('Destination folder for the organized copies of this project\n(folders inside it will mirror the network: one per step, then per group)', cur);
+      if (d === null) return;
+      post('api/projects/destination', { id: id, path: d.trim() }).then(function (r) { toast(r.message); loadProjects(); })
+        .catch(function (e) { toast(e.message); });
+      return;
+    }
+    var gl = ev.target.closest('[data-guide]');
+    if (gl) { ev.preventDefault(); location.href = 'p/' + encodeURIComponent(gl.getAttribute('data-guide')) + '/?page=analyses'; return; }
+    var rm = ev.target.closest('[data-remove]');
+    if (!rm) return;
+    ev.preventDefault(); ev.stopPropagation();
+    var id = rm.getAttribute('data-remove');
+    if (!confirm('Remove "' + id + '" from this list?\nIts folder and network are not touched; add it back any time.')) return;
+    post('api/projects/remove', { id: id }).then(function (r) { toast(r.message); loadProjects(); })
+      .catch(function (e) { toast(e.message); });
+  });
+  filterEl.addEventListener('input', render);
+  document.getElementById('refresh-btn').addEventListener('click', function () { loadProjects().then(function () { toast('Refreshed'); }); });
+
+  // add-project dialog
+  var modal = document.getElementById('modal');
+  function openModal(on) { modal.classList.toggle('open', on); document.getElementById('f-err').textContent = ''; if (on) document.getElementById('f-path').focus(); }
+  document.getElementById('add-btn').addEventListener('click', function () { openModal(true); });
+  document.getElementById('f-cancel').addEventListener('click', function () { openModal(false); });
+  modal.addEventListener('click', function (ev) { if (ev.target === modal) openModal(false); });
+  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') openModal(false); });
+  document.getElementById('f-bare').addEventListener('change', function () { if (this.checked) document.getElementById('f-create').checked = true; });
+  document.getElementById('add-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    post('api/projects/add', {
+      path: document.getElementById('f-path').value,
+      name: document.getElementById('f-name').value,
+      create: document.getElementById('f-create').checked,
+      bare: document.getElementById('f-bare').checked
+    }).then(function (r) { openModal(false); toast(r.message); document.getElementById('add-form').reset(); loadProjects(); })
+      .catch(function (e) { document.getElementById('f-err').textContent = e.message; });
+  });
+
+  document.getElementById('theme-toggle').addEventListener('click', function () {
+    var root = document.documentElement;
+    var cur = root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    var next = cur === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('sciweave-theme', next); } catch (e) {}
+  });
+
+  loadProjects();
+  // live: re-read the list when any project's graph changes (checked every 3 s, file times only)
+  var homeStamp = null;
+  setInterval(function () {
+    if (document.hidden) return;
+    fetch('api/projects/stamp').then(function (r) { return r.json(); }).then(function (s) {
+      var k = JSON.stringify(s);
+      if (homeStamp !== null && k !== homeStamp && !document.querySelector('.modal-bg.open')) loadProjects();
+      homeStamp = k;
+    }).catch(function () {});
+  }, 3000);
+})();
+</script>
+</body>
+</html>

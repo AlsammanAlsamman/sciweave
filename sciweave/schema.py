@@ -15,6 +15,7 @@ SCHEMA_VERSION = "sciweave/1"
 NODE_TYPES: dict[str, dict] = {
     "raw":        {"prefix": "RAW", "category": "sources", "folder": "data/raw",             "desc": "raw data"},
     "input":      {"prefix": "IN",  "category": "sources", "folder": "data/inputs",          "desc": "prepared input"},
+    "resource":   {"prefix": "RES", "category": "resources", "folder": "resources",          "desc": "online resource / service used (web server, database lookup): a URL, no file"},
     "pipeline":   {"prefix": "PL",  "category": "process", "folder": "pipelines",            "desc": "pipeline / workflow"},
     "step":       {"prefix": "SP",  "category": "process", "folder": "pipelines",            "desc": "pipeline step / rule"},
     "script":     {"prefix": "SC",  "category": "process", "folder": "scripts",              "desc": "analysis or plotting script"},
@@ -27,7 +28,7 @@ NODE_TYPES: dict[str, dict] = {
     "note":       {"prefix": "N",   "category": "notes",   "folder": "notes",                "desc": "note"},
 }
 
-CATEGORIES = ["sources", "process", "outputs", "writing", "notes"]
+CATEGORIES = ["sources", "resources", "process", "outputs", "writing", "notes"]
 
 EDGE_RELATIONS: dict[str, str] = {
     "feeds": "input consumed by a process",

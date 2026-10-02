@@ -34,15 +34,26 @@ is given explicitly.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
 from sciweave.project import MAX_SNAPSHOT_BYTES, Project, SciWeaveError
 from sciweave.schema import EDGE_RELATIONS, MODES, NODE_TYPES, is_scalar_param, now_iso, slugify
 
-# "alpha" deliberately absent: in statistics it is the significance level, not plot opacity
-COSMETIC_HINTS = ("font", "color", "colour", "width", "height", "dpi", "theme", "opacity", "title",
-                  "legend", "linewidth", "palette", "fontsize", "figsize", "label_size", "marker")
+# matched against whole words of the parameter name (font_size -> font, size), so e.g.
+# "la_marker" (a genetic marker) or "window_kb" are not mistaken for plot settings.
+# "alpha" deliberately absent: in statistics it is the significance level, not plot opacity.
+COSMETIC_HINTS = {"font", "fontsize", "color", "colour", "colors", "colours", "width", "height", "dpi", "theme",
+                  "opacity", "title", "legend", "linewidth", "palette", "figsize", "cmap", "colormap", "markersize"}
+COSMETIC_PAIRS = {("label", "size"), ("point", "size"), ("marker", "size"), ("line", "width"), ("fig", "size")}
+
+
+def looks_cosmetic(key: str) -> bool:
+    words = [w for w in re.split(r"[^a-z0-9]+", key.lower()) if w]
+    if any(w in COSMETIC_HINTS for w in words):
+        return True
+    return any((a, b) in COSMETIC_PAIRS for a, b in zip(words, words[1:]))
 OUTPUT_TYPES = ("table", "figure", "result", "supplement")
 
 TEMPLATE = {
@@ -97,6 +108,38 @@ def load_plan(path: str | Path) -> dict:
         raise SciWeaveError(f"plan is not valid JSON: {exc}")
 
 
+_CACHE: dict = {}
+
+
+def _dedup_cache(p: Project):
+    from sciweave import dedup
+    if p.root not in _CACHE:
+        _CACHE[p.root] = dedup.HashCache(p)
+    return _CACHE[p.root]
+
+
+def _dedup_sig(src) -> str | None:
+    """Content signature of a plan file (hash of its files' hashes), to catch the same file twice in one plan."""
+    import hashlib
+    from sciweave import dedup
+    fs = [f for f in dedup.files_of(src) if f.stat().st_size >= dedup.MIN_BYTES]
+    if not fs or sum(f.stat().st_size for f in fs) > 2e9:  # don't read gigabytes just for this
+        return None
+    h = hashlib.sha256()
+    for d in sorted(_sha(f) for f in fs):
+        h.update(d.encode())
+    return h.hexdigest()
+
+
+def _sha(f) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(f, "rb") as fh:
+        for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def check(p: Project, plan: dict) -> Report:
     r = Report()
     if plan.get("sciweave_plan") != 1:
@@ -115,6 +158,7 @@ def check(p: Project, plan: dict) -> Report:
     explicit = [n["id"] for n in plan.get("nodes", []) if n.get("id")]
     for dup in sorted({x for x in explicit if explicit.count(x) > 1}):
         r.error(f"explicit id {dup} is used by more than one node")
+    plan_sigs: dict[str, str] = {}  # content signature -> plan key (the same file twice in one plan)
     for i, n in enumerate(plan.get("nodes", [])):
         where = f"nodes[{i}]"
         key = n.get("key") or n.get("id")
@@ -165,6 +209,28 @@ def check(p: Project, plan: dict) -> Report:
                 if t in ("raw",) and mode == "managed" and src.is_file() and src.stat().st_size > 50e6:
                     r.warn(f"{where}: raw data is usually referenced (mode 'ref'), not copied")
                 r.ok(f"{where}: {t} '{label}' <- {path} ({mode})")
+                # one file, one node: identical content already in the network -> link to it instead
+                try:
+                    from sciweave import dedup
+                    hits = dedup.check_new(p, src, cache=_dedup_cache(p))
+                except OSError:
+                    hits = {"same_as": [], "overlaps": []}
+                if hits["same_as"] and not n.get("allow_duplicate"):
+                    r.error(f"{where}: identical content (bit by bit) to {', '.join(hits['same_as'])} — use that node in "
+                            f"edges instead of adding a copy (or set \"allow_duplicate\": true)")
+                elif hits["overlaps"]:
+                    r.warn(f"{where}: shares identical files with {', '.join(hits['overlaps'])} — consider one node per "
+                           f"shared file set")
+                sig = _dedup_sig(src)
+                if sig and sig in plan_sigs:
+                    r.error(f"{where}: same content as plan node '{plan_sigs[sig]}' — add it once and link it twice")
+                elif sig:
+                    plan_sigs[sig] = key
+        elif t == "resource":
+            if not (n.get("meta") or {}).get("url"):
+                r.warn(f"{where}: resource without meta.url — say where it is (the service's web address)")
+            else:
+                r.ok(f"{where}: resource '{label}' <- {n['meta']['url']}")
         elif t not in ("note", "article", "pipeline", "step") and not (n.get("meta") or {}).get("location"):
             r.warn(f"{where}: no path — it will be a conceptual node without versions "
                    f"(set meta.location if it lives elsewhere, e.g. on a cluster)")
@@ -246,7 +312,7 @@ def check(p: Project, plan: dict) -> Report:
         for k, v in params.items():
             if not is_scalar_param(v):
                 r.error(f"{where}: param '{k}' must be a scalar or list of scalars")
-            if any(h in k.lower() for h in COSMETIC_HINTS):
+            if looks_cosmetic(k):
                 r.warn(f"{where}: param '{k}' looks cosmetic — keep only result-changing parameters")
         if params and rel in ("code", "part_of", "related", "documents"):
             r.warn(f"{where}: params on a '{rel}' edge are unusual; put them on the feeds/produces/derives edge")

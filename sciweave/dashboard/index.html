@@ -16,7 +16,7 @@ __CSS__
 <body>
 <header>
   <div class="brand">
-    <img src="__LOGO__" alt="" width="28" height="28" style="border-radius:7px">
+    __HOMELINK__<img src="__LOGO__" alt="" width="28" height="28" style="border-radius:7px">
     SciWeave <span class="proj" id="proj-name"></span>
   </div>
   <nav class="tabs">
@@ -29,6 +29,7 @@ __CSS__
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
     <input id="search" placeholder="Highlight… (F1, finemap, L=10)" autocomplete="off">
   </div>
+  <button class="btn dest-btn" id="dest-toggle" title="The organized copy of this project: save objects to the destination folder (folders follow the network)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5 12 16l2.5-2.5"/></svg> Project actions</button>
   <button class="icon-btn" id="suggest-toggle" title="Suggestions from the monitor: new or changed results" style="position:relative">
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
     <span class="badge" id="suggest-count" hidden></span>
@@ -68,8 +69,10 @@ __CSS__
       <label title="Reference nodes (intermediates kept in their pipeline folders)"><input type="checkbox" id="show-refs" checked> references</label>
       <label><input type="checkbox" id="show-code" checked> script links</label>
       <label><input type="checkbox" id="show-params"> parameters on links</label>
+      <label title="Objects hidden for focus (from hidden analyses, or hidden by hand). Nothing is deleted."><input type="checkbox" id="show-hidden"> hidden items</label>
       <label><input type="checkbox" id="show-legend" checked> legend</label>
       <span class="spacer"></span>
+      <span class="muted dest-hint" id="dest-hint" hidden>Double-click a node to save it to the destination</span>
       <span class="muted" id="counts"></span>
       <button class="btn" id="fit-btn" title="Fit to screen">Fit</button>
     </div>

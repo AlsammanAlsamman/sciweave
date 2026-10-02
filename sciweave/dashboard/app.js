@@ -25,6 +25,7 @@
     showParams: load('showParams', false),
     showLegend: load('showLegend', true),
     hiddenTypes: load('hiddenTypes', []),
+    showHidden: load('showHidden', false),
     selected: null,
     selectedEdge: null,
     search: '',
@@ -35,6 +36,7 @@
   // ------------------------------------------------------------- icons ----
   // 24x24 stroke icons, one per node type (drawn inside the node circle).
   var ICONS = {
+    resource: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z',
     raw: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3',
     input: 'M14 3H6v18h12V7zM14 3v4h4M8 14h7M12 11l3 3-3 3',
     pipeline: 'M3 4h7v6H3zM14 14h7v6h-7zM6.5 10v3a4 4 0 0 0 4 4H14',
@@ -134,7 +136,7 @@
   function groupLabel(key) { return state.groupBy === 'step' ? stepLabel(key) : key; }
   function sortGroups(keys) {
     if (state.groupBy === 'step') return keys.sort(function (a, b) { return stepOrder(a) - stepOrder(b) || d3.ascending(a, b); });
-    var FLOW = ['sources', 'process', 'outputs', 'writing', 'notes', 'updated today', 'this week', 'this month', 'older'];
+    var FLOW = ['sources', 'resources', 'process', 'outputs', 'writing', 'notes', 'updated today', 'this week', 'this month', 'older'];
     return keys.sort(function (a, b) {
       var ia = FLOW.indexOf(a), ib = FLOW.indexOf(b);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || d3.ascending(a, b);
@@ -143,8 +145,11 @@
 
   function isHiddenRef(n) { return !state.showRefs && n.mode === 'ref' && catOf(n) === 'outputs'; }
 
+  // focus: objects hidden with their analysis (or by hand) leave the network unless "hidden items" is on
+  function isFocusHidden(n) { return !state.showHidden && !!(DATA.hidden || {})[n.id]; }
+
   function visible() {
-    var nodes = DATA.nodes.filter(function (n) { return !isHiddenRef(n) && state.hiddenTypes.indexOf(n.type) < 0; });
+    var nodes = DATA.nodes.filter(function (n) { return !isHiddenRef(n) && !isFocusHidden(n) && state.hiddenTypes.indexOf(n.type) < 0; });
     var ok = {}; nodes.forEach(function (n) { ok[n.id] = true; });
     var edges = DATA.edges.filter(function (e) {
       return ok[e.source] && ok[e.target] && (state.showCode || e.rel !== 'code');
@@ -212,6 +217,11 @@
       var el = d3.select(this), r = radius(d), s = st(d.id), fill = catColor(catOf(d));
       if (s.stale) el.append('circle').attr('class', 'ring-stale').attr('r', r + 4.5);
       else if (s.missing) el.append('circle').attr('class', 'ring-missing').attr('r', r + 4.5);
+      else if (!d.path && d.type !== 'resource') el.append('circle').attr('class', 'ring-nofile').attr('r', r + 4.5);
+
+      // large data the user skipped in "save all": its own outer red dashed circle (shown even when stale / modified)
+      if (d.organize_skip && !(DATA.organized || {})[d.id]) el.append('circle').attr('class', 'ring-skip').attr('r', r + 9);
+      if (isBig(d)) el.append('text').attr('class', 'big-badge').attr('x', -r * 0.95).attr('y', r * 0.95).attr('font-size', 13).text('\ud83d\udc18');
       else if (s.modified) el.append('circle').attr('class', 'ring-modified').attr('r', r + 4.5);
       el.append('circle').attr('class', 'body').attr('r', r).attr('fill', fill).attr('stroke', fill);
       var k = (r * 1.15) / 24;
@@ -226,6 +236,8 @@
         bg.append('path').attr('d', BRANCH_ICON).attr('transform', 'translate(-5,-5) scale(0.42)').attr('fill', 'none')
           .attr('stroke', cssVar('--text-2')).attr('stroke-width', 2.6).attr('stroke-linecap', 'round');
       }
+      if (state.newIds && state.newIds[d.id] && Date.now() - state.newIds[d.id] < 6000)
+        el.append('circle').attr('class', 'ring-new').attr('r', r + 6);
       if (ageDays(d.updated) < 1) el.append('circle').attr('class', 'recent-dot').attr('r', 4.5).attr('cx', -r * 0.74).attr('cy', -r * 0.74);
       if (d.final_version) el.append('text').attr('class', 'star').attr('x', r * 0.55).attr('y', -r * 0.55)
         .attr('font-size', 13).attr('fill', cssVar('--final')).text('★');
@@ -233,8 +245,298 @@
     g.on('mouseenter', function (evt, d) { showTip(evt, nodeTip(d)); })
       .on('mousemove', function (evt, d) { showTip(evt, nodeTip(d)); })
       .on('mouseleave', hideTip)
-      .on('click', function (evt, d) { evt.stopPropagation(); select(d.id); });
+      .on('click', function (evt, d) {
+        evt.stopPropagation();
+        // selecting opens the side panel, which narrows the network and shifts every node, so the
+        // browser's own dblclick would miss: wait briefly, and a second click on the node = copy
+        if (pendingClick && pendingClick.id === d.id) {
+          clearTimeout(pendingClick.timer); pendingClick = null;
+          organizeNode(d.id);
+          return;
+        }
+        if (pendingClick) clearTimeout(pendingClick.timer);
+        var id = d.id;
+        pendingClick = { id: id, timer: setTimeout(function () { pendingClick = null; select(id); }, 260) };
+      });
+    g.each(function (d) {
+      var o = (DATA.organized || {})[d.id];
+      if (!o) return;
+      var r = radius(d), col = o.state === 'ok' ? cssVar('--edge-plain') : cssVar('--stale');
+      var bg = d3.select(this).append('g').attr('class', 'org-badge').attr('transform', 'translate(' + (r * 0.78) + ',' + (r * 0.62) + ')');
+      bg.append('circle').attr('r', 6.5).attr('fill', cssVar('--surface')).attr('stroke', col).attr('stroke-width', 1.4);
+      bg.append('path').attr('d', 'M-3.6,-1.6h2.4l0.9,-1.1h3.9v4.9h-7.2z').attr('fill', col);
+    });
     return g;
+  }
+
+  // ------------------------------------------------ organized copies ----
+  // Double-click (or "Save to destination") copies the object to the project's destination,
+  // into <NN_step>/<group>/ so the folders mirror the network. Copies run on the server in
+  // the background; we poll api/jobs until they finish.
+  var jobTimer = null, pendingClick = null;
+  function organizeNode(id) {
+    if (!LIVE) { toast('Copying needs sciweave serve / open'); return; }
+    var n = byId[id];
+    if (!n || !n.path) { toast((n ? n.id : id) + ' has no file to copy'); return; }
+    var go = function () {
+      if ((DATA.organized || {})[id]) return recopyAsk(n).then(function (ok) { if (ok) post('api/organize', { node: id }).then(function (r) { toast(r.message); pollJobs(); }).catch(function (e) { toast(e.message); }); });
+      var run = function () {
+        post('api/organize', { node: id }).then(function (r) { toast(r.message); pollJobs(); })
+          .catch(function (e) { toast(e.message); });
+      };
+      if (!isBig(n)) return run();
+      askYesNo('\ud83d\udc18 Large data', bigText(n), 'Yes, copy it', 'Not now').then(function (ok) { if (ok) run(); });
+    };
+    if (!DATA.destination) {
+      var d = prompt('Where should the organized copies of this project live?\n(a folder, e.g. D:\\my_study)', '');
+      if (!d) return;
+      post('api/destination', { path: d }).then(function () { return refresh(true); }).then(go).catch(function (e) { toast(e.message); });
+      return;
+    }
+    go();
+  }
+  var jobsSeen = {}, jobsPrimed = false;  // jobs that finished before this page loaded stay quiet
+  var JOBS_NOW = {};  // node id -> its latest job (for the progress bars)
+  var RUN = { queued: 1, copying: 1, verifying: 1 };
+  function fmtDur(sec) {
+    if (!isFinite(sec) || sec < 0) return '';
+    if (sec < 60) return Math.max(1, Math.round(sec)) + ' s';
+    if (sec < 3600) return Math.round(sec / 60) + ' min';
+    return (sec / 3600).toFixed(1) + ' h';
+  }
+  function jobStats(j) {
+    var t0 = j.started ? Date.parse(j.started) / 1000 : null, el = t0 ? (j.heartbeat - t0) : 0;
+    var rate = el > 1 && j.bytes_done ? j.bytes_done / el : 0;  // bytes of work per second (copy + check)
+    var left = rate ? (j.bytes_total - j.bytes_done) / rate : NaN;
+    var pct = j.bytes_total ? Math.min(100, 100 * j.bytes_done / j.bytes_total) : 0;
+    return { pct: pct, rate: rate, left: left };
+  }
+  function jobLine(j, compact) {
+    if (!j) return '';
+    if (j.state === 'interrupted')
+      return '<div class="jl jl-bad">⚠ ' + (j.kind === 'verify' ? 'verification' : 'copy') + ' interrupted (the process stopped) — press Save to retry; leftovers are cleared first</div>';
+    if (j.state === 'error') return '<div class="jl jl-bad">⚠ ' + esc(j.error || 'failed') + '</div>';
+    if (!RUN[j.state]) return '';
+    if (j.state === 'queued') return '<div class="jl"><div class="pbar"><span style="width:0"></span></div><span class="muted">queued — waiting for a free slot (2 copies at a time)</span></div>';
+    var x = jobStats(j), half = j.bytes_total / 2;
+    var phase = j.kind === 'verify' ? 'verifying (SHA-256)' : (j.phase === 'checking' ? 'checking the copy (SHA-256)' : 'copying');
+    var data = j.kind === 'verify' ? bigSize(j.bytes_done) + ' of ' + bigSize(j.bytes_total)
+      : bigSize(Math.min(j.bytes_done, half)) + ' of ' + bigSize(half) + (j.bytes_done > half ? ' copied, checking' : '');
+    return '<div class="jl"><div class="pbar"><span style="width:' + x.pct.toFixed(1) + '%"></span></div><span>' + phase + ' ' + Math.floor(x.pct) + '%' +
+      (compact ? '' : ' · ' + data) + (x.rate ? ' · ' + bigSize(x.rate) + '/s' : '') + (isFinite(x.left) ? ' · ~' + fmtDur(x.left) + ' left' : '') + '</span></div>';
+  }
+  function paintJobs(jobs) {
+    JOBS_NOW = {};
+    jobs.forEach(function (j) {
+      var cur = JOBS_NOW[j.node];
+      if (!cur || (j.created || '') > (cur.created || '')) JOBS_NOW[j.node] = j;
+    });
+    Object.keys(JOBS_NOW).forEach(function (nid) {
+      var j = JOBS_NOW[nid];
+      document.querySelectorAll('[data-jobslot="' + nid + '"]').forEach(function (el) { el.innerHTML = jobLine(j, el.dataset.compact === '1'); });
+    });
+    document.querySelectorAll('[data-jobslot]').forEach(function (el) { if (!JOBS_NOW[el.dataset.jobslot]) el.innerHTML = ''; });
+    // overall bar in the project panel
+    var run = jobs.filter(function (j) { return RUN[j.state]; });
+    var el = document.getElementById('org-jobs');
+    if (el) {
+      if (!run.length) { el.innerHTML = ''; return; }
+      var tot = 0, done = 0, rate = 0, active = 0;
+      run.forEach(function (j) { tot += j.bytes_total || 0; done += j.bytes_done || 0; if (j.state !== 'queued') { rate += jobStats(j).rate; active++; } });
+      var pct = tot ? 100 * done / tot : 0, left = rate ? (tot - done) / rate : NaN;
+      el.innerHTML = '<div class="jl jl-sum"><div class="pbar"><span style="width:' + pct.toFixed(1) + '%"></span></div><span><b>' + active + ' running</b>' +
+        (run.length > active ? ', ' + (run.length - active) + ' queued' : '') + ' · ' + Math.floor(pct) + '%' +
+        (rate ? ' · ' + bigSize(rate) + '/s' : '') + (isFinite(left) ? ' · ~' + fmtDur(left) + ' left' : '') +
+        '</span><span class="muted" style="font-size:11px">copies run in their own processes: closing or restarting the dashboard does not stop them</span></div>';
+    }
+  }
+  function pollJobs() {
+    clearTimeout(jobTimer);
+    fetch('api/jobs').then(function (r) { return r.json(); }).then(function (jobs) {
+      var running = jobs.filter(function (j) { return RUN[j.state]; });
+      jobs.forEach(function (j) {
+        if (!RUN[j.state] && !jobsSeen[j.id]) {
+          jobsSeen[j.id] = true;
+          if (!jobsPrimed || j.state === 'interrupted') return;
+          toast(j.kind === 'verify' ? (j.state === 'done' ? (j.ok ? '✓ ' : '⚠ ') + j.node + ': ' + j.message : 'Verify of ' + j.node + ' failed: ' + j.error)
+            : j.state === 'done' ? j.node + ' copied and checked (SHA-256) → ' + j.path : 'Copy of ' + j.node + ' failed: ' + j.error);
+          refresh(true);
+        }
+      });
+      paintJobs(jobs);
+      jobsPrimed = true;
+      if (running.length) jobTimer = setTimeout(pollJobs, 1000);
+    }).catch(function () {});
+  }
+  // ---- the project actions panel: shown whenever no node is selected (and from the top-bar
+  // button): the organized copy (destination) with Save buttons for every object, and project actions ----
+  // the folder an object will be copied to (same rule as Project.organized_folder on the server)
+  function folderName(t) { return (String(t).trim().replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '') || 'item').slice(0, 60); }
+  function destFolder(n) {
+    var st = (DATA.steps || {})[n.step || ''];
+    var parts = [st ? ('0' + (st.order || 0)).slice(-2) + '_' + folderName(st.label) : '00_No_step'];
+    if (n.groups && n.groups.length) parts.push(folderName(((DATA.groups || {})[n.groups[0]] || {}).label || n.groups[0]));
+    return parts.join('/');
+  }
+  function renderProjectPanel() {
+    state.showingDest = true; state.showingSuggestions = false; state.selected = null; state.selectedEdge = null;
+    var org = DATA.organized || {}, dest = DATA.destination;
+    var html = '<div class="head"><div class="title"><h2>Project actions</h2><button class="icon-btn close" id="panel-close" title="Close (the Project actions button reopens it)">\u2715</button></div>' +
+      '<div class="muted" style="font-size:12.5px;margin-top:2px">Click a node for its own panel; close it to come back here.</div>' +
+      '<div class="actions"><button class="btn" data-sg="round" title="Look for new or changed result files not yet in the network">Check for new results</button>' +
+      '<button class="btn" data-gohist="1">Analysis history</button></div>' +
+      '<h3 class="pa-h">Organized copy \u00b7 destination</h3>';
+    if (!dest) {
+      html += '<p class="muted" style="margin:8px 0">Choose the folder where the organized copy of this project should live. ' +
+        'Inside it, one folder per step (and per group) will mirror the network.</p>' +
+        '<div class="actions"><button class="btn primary" data-dchange="1">Choose destination folder…</button></div></div>';
+      panelEl.innerHTML = html; panelEl.classList.add('open'); return;
+    }
+    var withFile = DATA.nodes.filter(function (n) { return n.path; });
+    var todo = withFile.filter(function (n) { return n.type !== 'resource' && !n.organize_skip && (!org[n.id] || org[n.id].state !== 'ok'); });
+    var skipped = withFile.filter(function (n) { return n.organize_skip && (!org[n.id] || org[n.id].state !== 'ok'); });
+    html += '<div class="mono dest-path">' + esc(dest) + '</div>' +
+      '<div class="muted" style="font-size:12.5px;margin-top:4px">' + Object.keys(org).length + ' of ' + withFile.length + ' objects copied. ' +
+      'Folders follow the network: one per step, then per group. Tip: double-click a node to save it.</div>' +
+      '<div class="actions"><button class="btn" data-dopen="1">Open folder</button><button class="btn" data-dchange="1">Change…</button>' +
+      (todo.length ? '<button class="btn primary" data-dall="1" title="Large data (\ud83d\udc18 > 4 GB) is asked one by one">Save all not copied (' + todo.length + ')</button>' : '') +
+      (skipped.length ? '<span class="muted" style="font-size:12px;align-self:center">' + skipped.length + ' large skipped</span>' : '') +
+      '</div><div id="org-jobs"></div></div>';
+    var steps = Object.keys(DATA.steps || {}).sort(function (a, b) { return (DATA.steps[a].order || 0) - (DATA.steps[b].order || 0); });
+    steps.push(null);
+    steps.forEach(function (sk) {
+      var items = DATA.nodes.filter(function (n) { return (n.step || null) === sk && !(DATA.hidden || {})[n.id]; });
+      if (!items.length) return;
+      var title = sk ? (DATA.steps[sk].order + '. ' + DATA.steps[sk].label) : 'No step';
+      html += '<div class="sec"><h3>' + esc(title) + '</h3>' + items.map(function (n) {
+        var o = org[n.id], st = n.type === 'resource' ? 'online' : !n.path ? 'nofile' : (o ? o.state : (n.organize_skip ? 'skipped' : 'none'));
+        var chip = { skipped: ['large \u00b7 skipped', 'state-missing'], online: ['online \u00b7 nothing to copy', ''], nofile: ['no file \u2014 needs a path', 'state-missing'], none: ['not copied', ''], ok: ['copied', 'org-ok'], source_changed: ['source changed', 'state-stale'],
+          copy_missing: ['copy missing', 'state-missing'], source_missing: ['source unreachable', 'state-missing'] }[st] || [st, ''];
+        var btns = '';
+        if (n.path) btns += '<button class="btn mini' + (st === 'ok' ? '' : ' primary') + '" data-dsave="' + esc(n.id) + '">' + (st === 'none' || st === 'skipped' ? 'Save' : st === 'ok' ? 'Copy again' : 'Update') + '</button>';
+        if (o && st !== 'copy_missing') btns += '<button class="btn mini" data-dshow="' + esc(n.id) + '">Show</button>';
+        return '<div class="dest-row"><div class="dest-name">' + nidLink(n.id) + ' ' + esc(trunc(n.label, 34)) +
+          (isBig(n) ? ' <span class="big" title="Large data: ' + bigSize(nodeSize(n)) + ' (asked before copying)">\ud83d\udc18 ' + bigSize(nodeSize(n)) + '</span>' : '') +
+          '<div class="muted dest-sub">' + esc(o ? o.path : (n.path ? '\u2192 ' + destFolder(n) + '/' : (n.meta && n.meta.url) || 'no file to copy')) + '</div></div>' +
+          '<span class="chip ' + chip[1] + '">' + chip[0] + '</span><span class="dest-btns">' + btns + '</span></div>' +
+          '<div class="dest-job" data-jobslot="' + esc(n.id) + '" data-compact="1">' + jobLine(JOBS_NOW[n.id], true) + '</div>';
+      }).join('') + '</div>';
+    });
+    panelEl.innerHTML = html;
+    panelEl.classList.add('open');
+    pollJobs();
+  }
+  document.getElementById('dest-toggle').onclick = function () {
+    if (!LIVE) { toast('Project actions need sciweave serve / open'); return; }
+    if (state.showingDest && panelEl.classList.contains('open')) { state.showingDest = false; state.projectPanelClosed = true; panelEl.classList.remove('open'); return; }
+    state.projectPanelClosed = false;
+    if (state.page !== 'network') setPage('network');
+    renderProjectPanel();
+  };
+  function setDestinationPrompt() {
+    var d = prompt('Destination folder for the organized copy of this project\n(one folder per step, then per group, will be made inside it)', DATA.destination || '');
+    if (d === null) return;
+    post('api/destination', { path: d.trim() }).then(function (r) { toast(r.message); return refresh(true); })
+      .then(function () { renderProjectPanel(); }).catch(function (e) { toast(e.message); });
+  }
+  // ---- large data (> 4 GB): marked with an elephant; "save all" asks yes / no for each one ----
+  var BIG = 4 * 1024 * 1024 * 1024;
+  function nodeSize(n) { var v = n.versions || []; return v.length ? v[v.length - 1].size || 0 : 0; }
+  function isBig(n) { return nodeSize(n) > BIG; }
+  function bigSize(b) { return b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : b >= 1e6 ? Math.round(b / 1e6) + ' MB' : b >= 1e3 ? Math.round(b / 1e3) + ' KB' : b + ' bytes'; }
+  function exactSize(b) { return Number(b || 0).toLocaleString() + ' bytes' + (b >= 1e3 ? ' (' + bigSize(b) + ')' : ''); }
+  function askYesNo(title, text, yes, no) {
+    return new Promise(function (resolve) {
+      var bg = document.createElement('div');
+      bg.className = 'yn-bg';
+      bg.innerHTML = '<div class="yn" role="dialog" aria-modal="true"><div class="yn-title">' + title + '</div><div class="yn-text">' + text + '</div>' +
+        '<div class="yn-row"><button class="btn" data-yn="no">' + esc(no) + '</button><button class="btn primary" data-yn="yes">' + esc(yes) + '</button></div></div>';
+      document.body.appendChild(bg);
+      bg.querySelector('[data-yn="yes"]').focus();
+      bg.addEventListener('click', function (e) {
+        var b = e.target.closest('[data-yn]'); if (!b) return;
+        document.body.removeChild(bg); resolve(b.dataset.yn === 'yes');
+      });
+    });
+  }
+  function bigText(n) {
+    return '<b>' + esc(n.id) + ' \u00b7 ' + esc(n.label) + '</b> is <b>' + bigSize(nodeSize(n)) + '</b>.<br>It would be copied to <code>' +
+      esc(joinDest(destFolder(n)) + (DATA.destination.indexOf('\\') >= 0 ? '\\' : '/')) + '</code>.';
+  }
+  // already copied: compare sizes (cheap) and ask before copying again
+  function recopyAsk(n) {
+    return post('api/organize-check', { node: n.id }).then(function (c) {
+      var sizes = '<span class="yn-sizes">source <b>' + exactSize(c.source_size) + '</b>, ' + c.source_files + ' file' + (c.source_files === 1 ? '' : 's') +
+        '<br>copy&nbsp;&nbsp;&nbsp;<b>' + exactSize(c.copy_size) + '</b>, ' + c.copy_files + ' file' + (c.copy_files === 1 ? '' : 's') + '</span>';
+      var sum = c.has_checksum ? 'SHA-256 checksum file next to the copy (verified ' + esc((c.verified_at || '').slice(0, 16).replace('T', ' ')) + ').'
+        : 'No checksum file yet (copied before checksums existed): use \u201cVerify copy\u201d to add one.';
+      if (c.up_to_date)
+        return askYesNo('Already up to date', '<b>' + esc(n.id) + ' \u00b7 ' + esc(n.label) + '</b>: sizes match and the source has not changed since it was copied.<br>' +
+          sizes + '<br><span class="muted">' + sum + '</span>', 'Copy again anyway', 'Keep the copy');
+      var why = c.state === 'copy_missing' ? 'The copy is missing at the destination.'
+        : c.state === 'source_missing' ? 'The source is not reachable right now.'
+        : !c.same_size ? 'Source and copy differ in size.' : 'The source changed since it was copied.';
+      if (c.state === 'source_missing') { toast(why); return false; }
+      return askYesNo('Update the copy?', '<b>' + esc(n.id) + ' \u00b7 ' + esc(n.label) + '</b>: ' + why + '<br>' + sizes +
+        '<br><span class="muted">The new copy is checked against the source (SHA-256) before it replaces the old one.</span>', 'Yes, update it', 'Not now');
+    }).catch(function (e) { toast(e.message); return false; });
+  }
+  function saveAll() {
+    var org = DATA.organized || {};
+    var todo = DATA.nodes.filter(function (n) { return n.path && n.type !== 'resource' && !n.organize_skip && (!org[n.id] || org[n.id].state !== 'ok'); });
+    var updates = todo.filter(function (n) { return org[n.id]; });
+    todo = todo.filter(function (n) { return !org[n.id]; });
+    var small = todo.filter(function (n) { return !isBig(n); }), big = todo.filter(isBig);
+    small.forEach(function (n) { post('api/organize', { node: n.id }).catch(function (e) { toast(e.message); }); });
+    if (small.length) toast('copying ' + small.length + ' object(s)\u2026');
+    // large data: one explicit yes / no each; a "no" is remembered and not asked again
+    var i = 0, yes = 0, no = 0, u = 0;
+    (function nextUpdate() {
+      if (u < updates.length) {
+        var un = updates[u++];
+        return recopyAsk(un).then(function (ok) {
+          return ok ? post('api/organize', { node: un.id }).catch(function (e) { toast(e.message); }) : null;
+        }).then(nextUpdate);
+      }
+      next();
+    })();
+    function next() {
+      if (i >= big.length) {
+        if (big.length) toast(yes + ' large copied, ' + no + ' skipped (red circle; Save on its own any time)');
+        setTimeout(pollJobs, 500); return refresh(true);
+      }
+      var n = big[i++];
+      askYesNo('\ud83d\udc18 Large data (' + (i) + ' of ' + big.length + ')', bigText(n) + '<br><br><span class="muted">No = skip it; it will not be asked again in \u201cSave all\u201d. It stays marked with a red circle and can be saved on its own.</span>',
+        'Yes, copy it', 'No, skip it').then(function (ok) {
+        (ok ? (yes++, post('api/organize', { node: n.id })) : (no++, post('api/organize-skip', { node: n.id, skip: true })))
+          .catch(function (e) { toast(e.message); }).then(next);
+      });
+    }
+  }
+  var ORG_STATE = { ok: 'up to date', source_changed: 'source changed since copied', copy_missing: 'copy missing at destination', source_missing: 'source not reachable' };
+  function joinDest(rel) {  // show the destination path in the platform's own style
+    var d = DATA.destination || '', win = d.indexOf('\\') >= 0;
+    return d + (win ? '\\' : '/') + (win ? String(rel).replace(/\//g, '\\') : rel);
+  }
+  function orgSection(n) {
+    var o = (DATA.organized || {})[n.id];
+    var h = '<div class="sec"><h3>Organized copy</h3>';
+    if (!DATA.destination) h += '<div class="muted">No destination yet. Double-click the node (or the button) to choose one.</div>';
+    else if (!o) h += '<div class="muted">Not copied yet. Double-click the node to copy it to <code>' + esc(DATA.destination) + '</code>.</div>';
+    else h += '<div class="kv"><div class="k">copy</div><div class="v mono">' + esc(joinDest(o.path)) + '</div>' +
+      '<div class="k">from</div><div class="v mono">' + esc(o.source) + '</div>' +
+      '<div class="k">state</div><div class="v"><span class="chip ' + (o.state === 'ok' ? 'org-ok' : 'state-stale') + '">' + esc(ORG_STATE[o.state] || o.state) + '</span> ' +
+      '<span class="muted">copied ' + esc((o.copied || '').slice(0, 16).replace('T', ' ')) + '</span></div>' +
+      '<div class="k">checksum</div><div class="v">' + (o.sidecar ? '<span class="mono" title="' + esc(o.sha256 || '') + '">' + esc(o.sidecar.split('/').pop()) +
+        '</span> <span class="muted">SHA-256, ' + (o.files || 1) + ' file' + ((o.files || 1) === 1 ? '' : 's') + ', verified ' + esc((o.verified || '').slice(0, 16).replace('T', ' ')) + '</span>'
+        : '<span class="muted">none yet \u2014 \u201cVerify copy\u201d compares it with the source and writes one</span>') + '</div></div>';
+    if (LIVE && n.path) h += '<div class="actions"><button class="btn' + (o && o.state === 'ok' ? '' : ' primary') + '" data-act="organize">' +
+      (o ? (o.state === 'ok' ? 'Copy again' : 'Update copy') : 'Save to destination') + '</button>' +
+      (o && o.state !== 'copy_missing' ? '<button class="btn primary" data-act="reveal" title="Open File Explorer at the copy">Show in folder</button>' : '') +
+      (o && o.state !== 'copy_missing' ? '<button class="btn" data-act="verify" title="Re-read the copy and check it against its SHA-256 checksum file">Verify copy</button>' : '') +
+      (DATA.destination ? '<button class="btn" data-act="reveal-dest" title="Open the destination folder">Open destination</button>' : '') + '</div>' +
+      '<div data-jobslot="' + esc(n.id) + '">' + jobLine(JOBS_NOW[n.id]) + '</div>';
+    return h + '</div>';
   }
 
   function addNodeLabels(g, placement) {
@@ -347,6 +649,14 @@
         anchor[gname] = [ctx.w / 2 + Math.cos(a) * ringR, ctx.h / 2 + Math.sin(a) * ringR];
       });
     }
+    // live growth: groups that were already drawn keep their place (a growing oval must not slide the
+    // others around); only a brand-new group gets a new spot. A reload, resize or new grouping re-lays out.
+    var ac = state.anchorCache;
+    if (ac && ac.mode === state.groupBy && !state.relayout)
+      Object.keys(anchor).forEach(function (g) { if (ac.a[g]) anchor[g] = ac.a[g]; });
+    state.anchorCache = { mode: state.groupBy, a: anchor };
+    if (state.relayout) state.posCache = {};
+    state.relayout = false;
     var seen = {};
     nodes.forEach(function (d, i) {
       var an = anchor[d.group];
@@ -377,6 +687,13 @@
       return force;
     }
 
+    // live growth: objects seen before go back to the same place relative to their group's centre
+    // (the centre moves when a group grows) and are held still while new objects settle around them
+    var pc = state.posCache || {}, known = 0;
+    nodes.forEach(function (d) {
+      var c = pc[d.id], an = anchor[d.group];
+      if (c && c.g === d.group && an) { d.x = an[0] + c.dx; d.y = an[1] + c.dy; d.fx = d.x; d.fy = d.y; known++; }
+    });
     var sim = d3.forceSimulation(nodes)
       .force('link', d3.forceLink(links).id(function (d) { return d.id; }).distance(function (l) { return l.e.rel === 'code' ? 60 : 95; })
         .strength(function (l) { return l.source.group === l.target.group ? 0.4 : 0.04; }))
@@ -471,7 +788,17 @@
     }
 
     sim.stop();
-    for (var i = 0; i < 320; i++) sim.tick();
+    // first layout: settle fully; later redraws (live updates): existing objects keep their place
+    var ticks = known && known >= nodes.length * 0.6 ? 120 : 320;
+    for (var i = 0; i < ticks; i++) sim.tick();
+    nodes.forEach(function (d) { d.fx = null; d.fy = null; });  // free again for dragging / gentle settling
+    function savePos() {
+      var c = {};
+      nodes.forEach(function (d) { var an = anchor[d.group]; if (an) c[d.id] = { dx: d.x - an[0], dy: d.y - an[1], g: d.group }; });
+      state.posCache = c;
+    }
+    savePos();
+    sim.on('end', savePos);
     tick();
     restoreOrFit(ctx, nodes.map(function (d) { return [d.x, d.y]; }));
     sim.on('tick', tick);
@@ -648,8 +975,9 @@
     renderLegend();
     var stale = DATA.nodes.filter(function (n) { return st(n.id).stale; }).length;
     var hiddenN = DATA.nodes.filter(function (n) { return state.hiddenTypes.indexOf(n.type) >= 0; }).length;
+    var focusN = Object.keys(DATA.hidden || {}).length;
     document.getElementById('counts').textContent = DATA.nodes.length + ' nodes · ' + DATA.edges.length + ' links' + (stale ? ' · ' + stale + ' stale' : '') +
-      (hiddenN ? ' · ' + hiddenN + ' hidden' : '');
+      (hiddenN ? ' · ' + hiddenN + ' type-hidden' : '') + (focusN ? ' · ' + focusN + ' hidden for focus' + (state.showHidden ? ' (shown)' : '') : '');
   }
 
   // ------------------------------------------------------- highlighting ----
@@ -712,6 +1040,9 @@
       '<div class="row"><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + cssVar('--edge-plain') + '" stroke-width="2"/></svg>no parameters</div>' +
       '<div class="row"><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + cssVar('--text-3') + '" stroke-width="2" stroke-dasharray="5 3"/></svg>stale link</div>' +
       '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none" stroke="' + cssVar('--stale') + '" stroke-width="2.5"/></svg>stale node</div>' +
+      '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none" stroke="' + cssVar('--edge-params') + '" stroke-width="2.5"/></svg>no file yet (needs a path)</div>' +
+      '<div class="row"><span style="width:18px;text-align:center">\ud83d\udc18</span>large data (&gt; 4 GB)</div>' +
+      '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none" stroke="' + cssVar('--edge-params') + '" stroke-width="2" stroke-dasharray="3 2"/></svg>large, skipped from Save all</div>' +
       '<div class="row"><svg width="26" height="8"><line x1="1" y1="4" x2="25" y2="4" stroke="' + cssVar('--text-2') + '" stroke-width="2.2" stroke-dasharray="0.5 5" stroke-linecap="round"/></svg>branch (variant of)</div>' +
       '<div class="row">' + branchSvg(16, cssVar('--text-2')) + 'alternative branch</div>' +
       '<div class="row"><svg width="18" height="18"><circle cx="9" cy="9" r="4.5" fill="' + cssVar('--accent') + '"/></svg>updated in the last 24 h</div>' +
@@ -724,7 +1055,7 @@
 
   // ------------------------------------------------------- side panel ----
   function select(id) {
-    state.showingSuggestions = false;
+    state.showingSuggestions = false; state.showingDest = false;
     state.selected = id; state.selectedEdge = null; state.askHighlight = null;
     try { history.replaceState(null, '', '#node=' + encodeURIComponent(id)); } catch (e) {}
     if (state.view === 'lineage') render(); else applyHighlight();
@@ -735,9 +1066,12 @@
     applyHighlight(); renderEdgePanel();
   }
   function clearSelection() {
-    state.selected = null; state.selectedEdge = null;
+    var wasProject = state.showingDest;
+    state.selected = null; state.selectedEdge = null; state.showingDest = false;
     try { history.replaceState(null, '', '#'); } catch (e) {}
-    panelEl.classList.remove('open');
+    // closing a node's panel brings back the project actions; closing those hides the panel
+    if (LIVE && !wasProject && !state.projectPanelClosed && state.page === 'network') renderProjectPanel();
+    else { panelEl.classList.remove('open'); if (wasProject) state.projectPanelClosed = true; }
     if (state.view === 'lineage') render(); else applyHighlight();
   }
 
@@ -780,15 +1114,21 @@
       '<span class="chip state-' + esc(s.state) + '">' + esc(s.state) + '</span>' +
       (n.step ? '<span class="chip" data-step="' + esc(n.step) + '" style="cursor:pointer">step ' + esc(stepLabel(n.step)) + '</span>' : '') +
       (n.final_version ? '<span class="chip"><span class="star">★</span> final v' + n.final_version + '</span>' : '') +
+      ((DATA.hidden || {})[n.id] ? '<span class="chip" title="' + esc(DATA.hidden[n.id]) + '">hidden · ' + esc(DATA.hidden[n.id]) + '</span>' : '') +
       (n.groups || []).map(function (g) { return '<span class="chip">#' + esc(g) + '</span>'; }).join('') + '</div>';
     html += '<div class="actions">' +
       '<button class="btn primary" data-act="save" ' + (LIVE && n.path ? '' : 'disabled') + ' title="Snapshot the file as a new version">Save version</button>' +
       '<button class="btn" data-act="final" ' + (LIVE && n.current_version ? '' : 'disabled') + '>Mark current final</button>' +
       '<button class="btn" data-act="note" ' + (LIVE ? '' : 'disabled') + '>Add note</button>' +
-      '<button class="btn" data-act="lineage">Lineage view</button></div>' +
+      '<button class="btn" data-act="hide" ' + (LIVE ? '' : 'disabled') + ' title="Hide from view for focus; nothing is deleted">' + ((DATA.hidden || {})[n.id] ? 'Unhide' : 'Hide') + '</button>' +
+      '<button class="btn" data-act="lineage">Lineage view</button>' +
+      (LIVE && n.path ? '<button class="btn" data-act="organize" title="Copy this object to the project destination, into the folder of its step / group (same as double-clicking the node)">' +
+        ((DATA.organized || {})[n.id] ? ((DATA.organized[n.id].state === 'ok') ? 'Copy again to destination' : 'Update copy at destination') : 'Save to destination') + '</button>' : '') +
+      '</div>' +
       (LIVE ? '' : '<div class="muted" style="font-size:12px;margin-top:6px">Static export: run <code>sciweave serve</code> for save / final / notes.</div>') +
       '</div>';
 
+    html += orgSection(n);
     if (s.reasons && s.reasons.length) html += '<div class="sec"><h3>Attention</h3>' + s.reasons.map(function (r) { return '<div>' + esc(r) + '</div>'; }).join('') + '</div>';
     html += '<div class="sec"><h3>About</h3><div class="kv">' +
       (n.description ? '<div class="k">description</div><div class="v">' + esc(n.description) + '</div>' : '') +
@@ -800,6 +1140,8 @@
       ((n.tags || []).length ? '<div class="k">tags</div><div class="v">' + esc(n.tags.join(', ')) + '</div>' : '') +
       Object.keys(n.meta || {}).filter(function (k) { return k !== 'origin'; }).map(function (k) {
         var val = n.meta[k]; if (typeof val === 'object') val = JSON.stringify(val);
+        if (k === 'url' && /^https?:\/\//.test(String(val)))
+          return '<div class="k">web address</div><div class="v"><a class="nid" href="' + esc(val) + '" target="_blank" rel="noopener">' + esc(val) + '</a></div>';
         return '<div class="k">' + esc(k.replace(/_/g, ' ')) + '</div><div class="v mono">' + esc(val) + '</div>';
       }).join('') +
       '</div></div>';
@@ -1019,6 +1361,16 @@
   panelEl.addEventListener('click', function (evt) {
     var stepEl = evt.target.closest('[data-step]');
     if (stepEl) { showStep(stepEl.dataset.step); return; }
+    if (evt.target.closest('[data-gohist]')) { setPage('history'); return; }
+    var dt = evt.target.closest('[data-dsave],[data-dshow],[data-dopen],[data-dchange],[data-dall]');
+    if (dt) {
+      if (dt.dataset.dsave) organizeNode(dt.dataset.dsave);
+      else if (dt.dataset.dshow) post('api/reveal', { node: dt.dataset.dshow }).then(function (r) { toast(r.message); }).catch(function (e) { toast(e.message); });
+      else if (dt.dataset.dopen) post('api/reveal', {}).then(function (r) { toast(r.message); }).catch(function (e) { toast(e.message); });
+      else if (dt.dataset.dchange) setDestinationPrompt();
+      else if (dt.dataset.dall) saveAll();
+      return;
+    }
     var t = evt.target.closest('[data-goto],[data-act],[data-vprev],[data-vfinal],[data-vrestore],[data-brmain],[data-sg],[data-sgsave],[data-sgcopy],[data-sgignore],#panel-close');
     if (!t) return;
     var n = byId[state.selected];
@@ -1051,7 +1403,12 @@
       case 'save': saveWithWhy(n.id); break;
       case 'final': act(post('api/final', { node: n.id })); break;
       case 'note': var txt = prompt('Note for ' + n.id, ''); if (txt) act(post('api/note', { node: n.id, text: txt })); break;
+      case 'hide': act(post('api/hide', { node: n.id, hidden: !(DATA.hidden || {})[n.id] })); break;
       case 'lineage': setView('lineage'); break;
+      case 'organize': organizeNode(n.id); break;
+      case 'verify': post('api/verify', { node: n.id }).then(function (r) { toast(r.message); pollJobs(); }).catch(function (e) { toast(e.message); }); break;
+      case 'reveal': post('api/reveal', { node: n.id }).then(function (r) { toast(r.message); }).catch(function (e) { toast(e.message); }); break;
+      case 'reveal-dest': post('api/reveal', {}).then(function (r) { toast(r.message); }).catch(function (e) { toast(e.message); }); break;
     }
   });
 
@@ -1160,14 +1517,227 @@
     }).join('') + '</div>';
   }
 
+
+  // ------------------------------------------------- analysis guide ----
+  // The analysis history as drill-down columns: top-level analyses (raw / input
+  // data first) in the first column; clicking one lists its branches in the next
+  // column, and so on. The right pane shows the selected analysis: summary, dates,
+  // parameters, paths, objects in the network, branches and its own history.
+  var histMode = null;
+  // peek: hidden analyses opened from their blue dot for this visit only (not saved, not unhidden)
+  var guide = { path: null, q: '', showHidden: load('guideShowHidden', false), peek: {} };
+  var EYE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg>';
+  var EYE_OFF = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18M10.6 5.1A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6C3.9 8.3 2 12 2 12s3.6 7 10 7a9.8 9.8 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+  function aHidden(k) { var all = A(), cur = k; while (cur) { if (all[cur] && all[cur].hidden) return true; cur = all[cur] && all[cur].parent; } return false; }
+  function aPeeked(k) { var all = A(), cur = k; while (cur) { if (guide.peek[cur]) return true; cur = all[cur] && all[cur].parent; } return false; }
+  function aShown(k) { return guide.showHidden || !aHidden(k) || aPeeked(k); }
+  function guideKey() { return 'guide-' + (DATA.project && DATA.project.name || ''); }
+  function A() { return DATA.analyses || {}; }
+  function aKids(parent, includeHidden) {
+    var all = A();
+    return Object.keys(all).filter(function (k) { return (all[k].parent || null) === parent && (includeHidden || aShown(k)); }).sort(function (x, y) {
+      return d3.ascending(all[x].order || 0, all[y].order || 0) || d3.ascending(all[x].start || '', all[y].start || '') || d3.ascending(x, y);
+    });
+  }
+  function aNumbers() {
+    var num = {};
+    (function walk(parent, prefix) {
+      var kids = aKids(parent, true), zero = kids.length && A()[kids[0]].order === 0 ? 1 : 0;  // order 0 = numbered 0 ("before")
+      kids.forEach(function (k, i) { num[k] = prefix + (i + 1 - zero); walk(k, num[k] + '.'); });
+    })(null, '');
+    return num;
+  }
+  function aDescendants(k) { var n = 0; aKids(k).forEach(function (c) { n += 1 + aDescendants(c); }); return n; }
+  function aWhen(a) {
+    var s = a.start || '', e = a.end || '';
+    if (!s && !e) return '';
+    if (!e || e === s) return s || e;
+    return s + ' → ' + (e.slice(0, 4) === s.slice(0, 4) ? e.slice(5) : e);
+  }
+  // text may refer to other analyses as @key: shown as a link with the current number
+  var AREF = /@([A-Za-z0-9_](?:[A-Za-z0-9_.\-]*[A-Za-z0-9_])?)/g;
+  function aText(s, num) {
+    return esc(s || '').replace(AREF, function (m, k) {
+      return A()[k] ? '<a class="nid aref" data-akey="' + esc(k) + '" title="' + esc(A()[k].title) + '">' + esc(num[k] + ' ' + trunc(A()[k].title, 40)) + '</a>' : m;
+    });
+  }
+  function aPlain(s, num) {
+    return String(s || '').replace(AREF, function (m, k) { return A()[k] ? num[k] + ' ' + trunc(A()[k].title, 30) : m; });
+  }
+  function aMatches(k, q) {
+    var a = A()[k];
+    return JSON.stringify([k, a.title, a.group, a.summary, a.issue, a.params, a.tools, a.paths, a.feeds, a.history]).toLowerCase().indexOf(q) >= 0;
+  }
+
+  function renderGuide() {
+    var el = document.getElementById('guide');
+    var all = A(), keys = Object.keys(all);
+    if (!keys.length) {
+      el.innerHTML = '<div class="empty-hint">No analysis history yet. Add one with <code>sciweave analysis add raw "Raw &amp; input data"</code> ' +
+        'or load a whole guide with <code>sciweave analysis import guide.json</code> (or ask Claude to build it).</div>';
+      return;
+    }
+    if (!guide.path) guide.path = load(guideKey(), []);
+    guide.path = guide.path.filter(function (k) { return all[k] && aShown(k); });
+    // keep the path consistent: each entry must be a child of the previous one
+    for (var i = 0; i < guide.path.length; i++) {
+      if ((all[guide.path[i]].parent || null) !== (i ? guide.path[i - 1] : null)) { guide.path = guide.path.slice(0, i); break; }
+    }
+    var num = aNumbers();
+    var hiddenKeys = keys.filter(aHidden), shownKeys = keys.filter(function (k) { return !aHidden(k); });
+    var done = shownKeys.filter(function (k) { return all[k].organized; }).length;
+    var head = '<div class="guide-head"><div><h3>Analysis history</h3><div class="muted" style="font-size:12px">' + shownKeys.length +
+      ' analyses in focus' + (hiddenKeys.length ? ' · ' + hiddenKeys.length + ' hidden' : '') + ' · click an analysis to open its branches; the eye hides it (nothing is deleted)</div></div>' +
+      (hiddenKeys.length ? '<label class="gshow"><input type="checkbox" id="guide-show-hidden"' + (guide.showHidden ? ' checked' : '') + '> show hidden (' + hiddenKeys.length + ')</label>' : '') +
+      '<div class="guide-prog" title="analyses in focus whose results are recorded in the network"><div class="bar"><span style="width:' +
+      (100 * done / Math.max(1, shownKeys.length)) + '%"></span></div><span class="muted">' + done + ' / ' + shownKeys.length + ' organized</span></div>' +
+      '<div class="search" style="min-width:200px"><input id="guide-q" placeholder="Find an analysis…" value="' + esc(guide.q) + '"></div></div>';
+
+    var cols = '';
+    if (guide.q) {
+      var hits = keys.filter(function (k) { return aShown(k) && aMatches(k, guide.q); });
+      hits.sort(function (x, y) {
+        var a = num[x].split('.').map(Number), b = num[y].split('.').map(Number);
+        for (var i = 0; i < Math.max(a.length, b.length); i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0); }
+        return 0;
+      });
+      cols = '<div class="gcol wide"><div class="gcol-h">' + hits.length + ' match' + (hits.length === 1 ? '' : 'es') + '</div>' +
+        (hits.map(function (k) { return aRow(k, num, guide.path.indexOf(k) >= 0, true); }).join('') || '<div class="muted" style="padding:10px">Nothing matches.</div>') + '</div>';
+    } else {
+      var levels = [null].concat(guide.path);
+      levels.forEach(function (parent, lvl) {
+        var kids = aKids(parent, true);
+        if (!kids.length) return;
+        var title = parent ? num[parent] + ' ' + all[parent].title : 'Start here';
+        // hidden analyses stay in the chain as blue dots (consecutive ones share a strip)
+        var html = '', dots = [];
+        var flush = function () {
+          if (!dots.length) return;
+          html += '<div class="gdots" title="' + dots.length + ' hidden · click a dot to show it">' + dots.map(function (k) {
+            return '<span class="gdot" role="button" tabindex="0" data-apeek="' + esc(k) + '" title="' + esc(num[k] + ' ' + all[k].title) + ' (hidden) · click to show"></span>';
+          }).join('') + '<span class="gdots-n">' + dots.length + ' hidden</span></div>';
+          dots = [];
+        };
+        var lastGroup = null;
+        kids.forEach(function (k) {
+          var g = all[k].group || '';
+          if (g !== lastGroup) {
+            flush();
+            if (g) html += '<div class="ggroup" title="Group label: independent items that belong together">' + esc(g) + '</div>';
+            else if (lastGroup) html += '<div class="ggroup gnone"></div>';
+            lastGroup = g;
+          }
+          if (aShown(k)) { flush(); html += aRow(k, num, guide.path[lvl] === k, false); } else dots.push(k);
+        });
+        flush();
+        cols += '<div class="gcol"><div class="gcol-h" title="' + esc(title) + '">' + esc(trunc(title, 34)) + '</div>' + html + '</div>';
+      });
+    }
+    var sel = guide.path[guide.path.length - 1];
+    el.innerHTML = head + '<div class="guide-body"><div class="gcols" id="gcols">' + cols + '</div>' +
+      '<div class="gdetail" id="gdetail">' + (sel ? aDetail(sel, num) : aIntro(num)) + '</div></div>';
+    var gc = document.getElementById('gcols'); gc.scrollLeft = gc.scrollWidth;
+    var shEl = document.getElementById('guide-show-hidden');
+    if (shEl) shEl.onchange = function () { guide.showHidden = shEl.checked; store('guideShowHidden', guide.showHidden); renderGuide(); };
+    var qEl = document.getElementById('guide-q');
+    qEl.oninput = function () { guide.q = qEl.value.trim().toLowerCase(); var pos = qEl.selectionStart; renderGuide(); var n = document.getElementById('guide-q'); n.focus(); n.setSelectionRange(pos, pos); };
+  }
+
+  function aRow(k, num, on, showPath) {
+    var a = A()[k], nk = aKids(k).length, hid = aHidden(k), own = !!a.hidden;
+    var trail = '';
+    if (showPath && a.parent) {
+      var p = A()[a.parent];
+      trail = '<div class="gtrail">in ' + esc(num[a.parent] + ' ' + trunc(p.title, 30)) + '</div>';
+    }
+    return '<button class="grow' + (on ? ' on' : '') + (hid ? (aPeeked(k) && !guide.showHidden ? ' gpeek' : ' ghidden') : '') + '" data-akey="' + esc(k) + '">' +
+      (guide.peek[k] && !guide.showHidden ? '<span class="gdot in" role="button" tabindex="0" data-apeek="' + esc(k) + '" title="Fold back into a dot"></span>' : '') +
+      '<span class="gnum">' + esc(num[k]) + '</span>' +
+      '<span class="gmain"><span class="gtitle">' + esc(a.title) + '</span>' + trail +
+      '<span class="gmeta">' + '<i class="dot st-' + esc(a.status || 'done') + '"></i>' + esc(aWhen(a) || a.status || '') +
+      (a.organized ? ' · <span class="gok">✓ organized</span>' : '') + (a.issue ? ' · <span class="gwarn" title="' + esc(aPlain(a.issue, num)) + '">⚠ issue</span>' : '') + '</span></span>' +
+      (LIVE && (!hid || own) ? '<span class="geye' + (own ? ' on' : '') + '" role="button" tabindex="0" data-ahide="' + esc(k) + '" title="' + (own ? 'Unhide' : 'Hide from view (with its branches and the objects only it uses)') + '">' + (own ? EYE_OFF : EYE) + '</span>' : '') +
+      (nk ? '<span class="gkids" title="' + nk + ' branch' + (nk > 1 ? 'es' : '') + '">' + nk + ' ›</span>' : '') + '</button>';
+  }
+
+  function aIntro(num) {
+    var tops = aKids(null);
+    return '<div class="gd-sec"><h2 style="margin:0 0 6px">The analyses, in order</h2><p class="muted" style="margin:0 0 12px">Pick one on the left to see what was done, when, with which parameters, and its own history. ' +
+      'Analyses with branches (›) open another column.</p>' +
+      tops.map(function (k) {
+        var a = A()[k], n = aDescendants(k);
+        return '<div class="gd-top" data-akey="' + esc(k) + '"><span class="gnum">' + esc(num[k]) + '</span><div><b>' + esc(a.title) + '</b>' +
+          (n ? ' <span class="muted">· ' + n + ' inside</span>' : '') + '<div class="muted" style="font-size:12.5px">' + esc(trunc(aPlain(a.summary, num), 170)) + '</div></div></div>';
+      }).join('') + '</div>';
+  }
+
+  function aDetail(k, num) {
+    var all = A(), a = all[k];
+    var crumbs = [], cur = k;
+    while (cur) { crumbs.unshift(cur); cur = all[cur].parent; }
+    var h = '<div class="gd-crumbs">' + crumbs.map(function (c, i) {
+      return (i ? '<span class="muted"> › </span>' : '') + '<a class="nid" data-akey="' + esc(c) + '">' + esc(num[c] + ' ' + trunc(all[c].title, 28)) + '</a>';
+    }).join('') + '</div>';
+    h += '<div class="gd-sec"><h2 class="gd-title"><span class="gnum big">' + esc(num[k]) + '</span>' + esc(a.title) + '</h2><div class="chips">' +
+      '<span class="chip"><i class="dot st-' + esc(a.status || 'done') + '"></i>' + esc(a.status || 'done') + '</span>' +
+      (aWhen(a) ? '<span class="chip">' + esc(aWhen(a)) + '</span>' : '') +
+      (a.group ? '<span class="chip gchip">group · ' + esc(a.group) + '</span>' : '') +
+      (a.step && DATA.steps && DATA.steps[a.step] ? '<span class="chip">step · ' + esc(DATA.steps[a.step].label) + '</span>' : '') +
+      '<span class="chip ' + (a.organized ? 'gok-chip' : '') + '">' + (a.organized ? '✓ organized in the network' : 'not organized yet') + '</span>' +
+      '<span class="chip mono">' + esc(k) + '</span></div>' +
+      (a.summary ? '<p class="gd-summary">' + aText(a.summary, num) + '</p>' : '') +
+      (a.issue ? '<div class="gd-issue"><b>Open issue</b> ' + aText(a.issue, num) + '</div>' : '') +
+      (aHidden(k) ? '<div class="gd-hidden">' + EYE_OFF + (a.hidden ? ' Hidden from view, with its branches and the objects only it uses. Nothing is deleted.'
+        : ' Hidden because it is inside a hidden analysis.') + (aPeeked(k) && !guide.showHidden ? ' You are looking at it from its blue dot; it stays hidden.' : '') + '</div>' : '') +
+      (LIVE ? '<div class="actions"><button class="btn' + (a.organized ? '' : ' primary') + '" data-aorg="' + esc(k) + '">' +
+        (a.organized ? 'Mark not organized' : 'Mark organized ✓') + '</button>' +
+        (!aHidden(k) || a.hidden ? '<button class="btn" data-ahide="' + esc(k) + '">' + (a.hidden ? 'Unhide' : 'Hide from view') + '</button>' : '') + '</div>' : '') + '</div>';
+    var kv = [];
+    if (a.params) {
+      var pv = typeof a.params === 'object' ? Object.keys(a.params).map(function (p) { return '<tr><td>' + esc(p) + '</td><td>' + esc(a.params[p]) + '</td></tr>'; }).join('')
+        : '<tr><td colspan="2">' + esc(a.params) + '</td></tr>';
+      kv.push(['Parameters', '<table class="params-table">' + pv + '</table>']);
+    }
+    if (a.tools) kv.push(['Tools', esc(a.tools)]);
+    if (a.feeds) kv.push(['Feeds', aText(a.feeds, num)]);
+    if (kv.length) h += '<div class="gd-sec"><div class="kv">' + kv.map(function (r) { return '<div class="k">' + r[0] + '</div><div class="v">' + r[1] + '</div>'; }).join('') + '</div></div>';
+    if (a.paths && a.paths.length) h += '<div class="gd-sec"><h3>Where it lives</h3>' + a.paths.map(function (p) { return '<div class="gpath mono">' + esc(p) + '</div>'; }).join('') + '</div>';
+    var nodes = (a.nodes || []).filter(function (n) { return byId[n]; });
+    h += '<div class="gd-sec"><h3>In the network</h3>' + (nodes.length ? nodes.map(function (n) { return '<div>' + nidLink(n) + ' ' + esc(trunc(byId[n].label, 60)) + '</div>'; }).join('')
+      : '<div class="muted">Nothing recorded yet. When its results are added, link them with <code>sciweave analysis link ' + esc(k) + ' &lt;IDs&gt;</code>.</div>') + '</div>';
+    var kids = aKids(k);
+    if (kids.length) h += '<div class="gd-sec"><h3>Branches (' + kids.length + ')</h3>' + kids.map(function (c) {
+      return '<div class="gd-top" data-akey="' + esc(c) + '"><span class="gnum">' + esc(num[c]) + '</span><div><b>' + esc(all[c].title) + '</b> <span class="muted">' + esc(aWhen(all[c])) + '</span>' +
+        '<div class="muted" style="font-size:12.5px">' + esc(trunc(aPlain(all[c].summary, num), 150)) + '</div></div></div>';
+    }).join('') + '</div>';
+    var hist = a.history || [];
+    h += '<div class="gd-sec"><h3>History</h3>' + (hist.length ? '<div class="ghist">' + hist.map(function (e) {
+      return '<div class="gh"><span class="gh-d">' + esc(e.date || '') + '</span><span>' + aText(e.text, num) + '</span></div>';
+    }).join('') + '</div>' : '<div class="muted">No dated events yet.</div>') +
+      (LIVE ? '<form class="gh-add" data-alog="' + esc(k) + '"><input name="d" type="date" class="ctl"><input name="t" placeholder="Add what happened…" class="ctl" style="flex:1"><button class="btn" type="submit">Add</button></form>' : '') + '</div>';
+    return h;
+  }
+
+  function guideOpen(k) {
+    var all = A(), path = [], cur = k;
+    while (cur) { path.unshift(cur); cur = all[cur].parent; }
+    guide.path = path; store(guideKey(), path);
+    renderGuide();
+  }
+
   // ----------------------------------------------------------- history ----
   var histFilter = { actor: '', event: '', text: '' };
   function renderHistory() {
     var el = document.getElementById('history');
+    if (!histMode) histMode = Object.keys(A()).length ? 'analyses' : 'activity';
+    var seg = '<div class="seg" role="tablist">' + [['analyses', 'Analyses'], ['activity', 'Activity']].map(function (m) {
+      return '<button class="' + (histMode === m[0] ? 'on' : '') + '" data-hmode="' + m[0] + '">' + m[1] + '</button>';
+    }).join('') + '</div>';
+    if (histMode === 'analyses') { el.innerHTML = seg + '<div id="guide"></div>'; renderGuide(); return; }
     var H = DATA.history;
     var actors = Array.from(new Set(H.map(function (h) { return h.actor; }))).sort();
     var events = Array.from(new Set(H.map(function (h) { return h.event; }))).sort();
-    el.innerHTML = '<div class="growth"><h3>Project growth</h3><div class="muted" style="font-size:12px">cumulative nodes and saved versions over time</div><svg id="growth-svg"></svg></div>' +
+    el.innerHTML = seg + '<div class="growth"><h3>Project growth</h3><div class="muted" style="font-size:12px">cumulative nodes and saved versions over time</div><svg id="growth-svg"></svg></div>' +
       '<div class="filters"><select class="ctl" id="hf-actor"><option value="">all actors</option>' + actors.map(function (a) { return '<option' + (a === histFilter.actor ? ' selected' : '') + '>' + esc(a) + '</option>'; }).join('') + '</select>' +
       '<select class="ctl" id="hf-event"><option value="">all events</option>' + events.map(function (a) { return '<option' + (a === histFilter.event ? ' selected' : '') + '>' + esc(a) + '</option>'; }).join('') + '</select>' +
       '<div class="search" style="min-width:220px"><input id="hf-text" placeholder="filter text / node id" value="' + esc(histFilter.text) + '"></div>' +
@@ -1240,7 +1810,64 @@
   }
 
   document.getElementById('articles').addEventListener('click', function (evt) { var t = evt.target.closest('[data-goto]'); if (t) goTo(t.dataset.goto); });
-  document.getElementById('history').addEventListener('click', function (evt) { var t = evt.target.closest('[data-goto]'); if (t) goTo(t.dataset.goto); });
+  document.getElementById('history').addEventListener('click', function (evt) {
+    var t = evt.target.closest('[data-goto]'); if (t) { goTo(t.dataset.goto); return; }
+    var m = evt.target.closest('[data-hmode]'); if (m) { histMode = m.dataset.hmode; renderHistory(); return; }
+    var pk = evt.target.closest('[data-apeek]');
+    if (pk) {
+      evt.preventDefault(); evt.stopPropagation();
+      var key = pk.dataset.apeek;
+      if (guide.peek[key]) {
+        delete guide.peek[key];
+        var at = guide.path.indexOf(key); if (at >= 0) guide.path = guide.path.slice(0, at);
+      } else {
+        guide.peek[key] = true;
+        var par = A()[key].parent || null, lvl = par ? guide.path.indexOf(par) + 1 : 0;
+        guide.path = guide.path.slice(0, lvl).concat([key]);  // open it right away
+      }
+      renderGuide();
+      return;
+    }
+    var hb = evt.target.closest('[data-ahide]');
+    if (hb) {
+      evt.preventDefault(); evt.stopPropagation();
+      var hk = hb.dataset.ahide, willHide = !A()[hk].hidden;
+      if (!willHide) delete guide.peek[hk];
+      post('api/analysis', { key: hk, hidden: willHide }).then(function (r) {
+        toast(willHide ? 'Hidden from view (nothing deleted). "show hidden" brings it back.' : 'Back in view');
+        return refresh(true);
+      }).catch(function (e) { toast(e.message); });
+      return;
+    }
+    var o = evt.target.closest('[data-aorg]');
+    if (o) {
+      var k = o.dataset.aorg;
+      post('api/analysis', { key: k, organized: !A()[k].organized }).then(function (r) { toast(r.message); return refresh(true); })
+        .catch(function (e) { toast(e.message); });
+      return;
+    }
+    var a = evt.target.closest('[data-akey]');
+    if (a) {
+      var key = a.dataset.akey;
+      if (a.classList.contains('grow') && !guide.q) {
+        // clicking a row in column L selects it and opens its branches in column L+1
+        var par = A()[key].parent || null, lvl = par ? guide.path.indexOf(par) + 1 : 0;
+        guide.path = guide.path.slice(0, lvl).concat([key]); store(guideKey(), guide.path); renderGuide();
+      } else { guide.q = ''; guideOpen(key); }
+    }
+  });
+  document.getElementById('history').addEventListener('keydown', function (evt) {
+    if ((evt.key === 'Enter' || evt.key === ' ') && evt.target.matches && evt.target.matches('[data-apeek],[data-ahide]')) {
+      evt.preventDefault(); evt.target.click();
+    }
+  });
+  document.getElementById('history').addEventListener('submit', function (evt) {
+    var f = evt.target.closest('[data-alog]'); if (!f) return;
+    evt.preventDefault();
+    var text = f.elements.t.value.trim(); if (!text) return;
+    post('api/analysis', { key: f.dataset.alog, log: text, date: f.elements.d.value }).then(function (r) { toast('added to the history'); return refresh(true); })
+      .catch(function (e) { toast(e.message); });
+  });
 
   // ---------------------------------------------------------- controls ----
   function setPage(p) {
@@ -1257,11 +1884,14 @@
   var viewSel = document.getElementById('view-select'); viewSel.value = state.view; viewSel.onchange = function () { setView(viewSel.value); };
   var grpSel = document.getElementById('group-select'); grpSel.value = state.groupBy;
   grpSel.onchange = function () { state.groupBy = grpSel.value; store('groupBy', state.groupBy); state.zoom = {}; render(); };
-  [['show-refs', 'showRefs'], ['show-code', 'showCode'], ['show-params', 'showParams'], ['show-legend', 'showLegend']].forEach(function (p) {
+  [['show-refs', 'showRefs'], ['show-code', 'showCode'], ['show-params', 'showParams'], ['show-legend', 'showLegend'], ['show-hidden', 'showHidden']].forEach(function (p) {
     var el = document.getElementById(p[0]); el.checked = state[p[1]];
     el.onchange = function () { state[p[1]] = el.checked; store(p[1], el.checked); if (p[1] === 'showLegend') renderLegend(); else render(); };
   });
-  document.getElementById('fit-btn').onclick = function () { if (state.fitCurrent) state.fitCurrent(); };
+  document.getElementById('fit-btn').onclick = function (evt) {
+    if (evt.shiftKey) { state.relayout = true; state.forceFit = true; render(); return; }  // shift+Fit: fresh layout
+    if (state.fitCurrent) state.fitCurrent();
+  };
 
   // legend: click a node type to hide it from the network, click again to show it
   function toggleType(t) {
@@ -1343,23 +1973,46 @@
 
   // live refresh
   var liveBtn = document.getElementById('live-toggle');
-  var liveOn = LIVE && load('live', false), liveTimer = null, sig = '';
+  var liveOn = LIVE && load('live2', true), liveTimer = null, sig = '', lastStamp = null;
+  function typing() {  // don't redraw under someone typing a note / history line
+    var a = document.activeElement;
+    return a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && (panelEl.contains(a) || document.getElementById('history').contains(a));
+  }
+  function pollStamp() {
+    if (document.hidden) return;
+    fetch('api/stamp').then(function (r) { return r.json(); }).then(function (s) {
+      var k = JSON.stringify([s.graph, s.history]);
+      if (lastStamp !== null && k !== lastStamp && !typing()) refresh(false);
+      if (!typing()) lastStamp = k;
+      if (s.jobs) pollJobs();
+    }).catch(function () {});
+  }
   if (!LIVE) liveBtn.style.display = 'none';
-  function signature(d) { return JSON.stringify([d.nodes, d.edges, d.status, d.history.length]); }
+  function signature(d) { return JSON.stringify([d.nodes, d.edges, d.status, d.history.length, d.analyses, d.hidden, d.organized, d.destination]); }
   function refresh(force) {
     if (!LIVE) return Promise.resolve();
     return fetch('api/graph').then(function (r) { return r.json(); }).then(function (d) {
       var s = signature(d);
       if (!force && s === sig) return;
+      var before = {}; (DATA && DATA.nodes || []).forEach(function (n) { before[n.id] = true; });
+      var now = Date.now(), added = d.nodes.filter(function (n) { return DATA && !before[n.id]; });
+      state.newIds = state.newIds || {};
+      added.forEach(function (n) { state.newIds[n.id] = now; });
+      if (added.length) {
+        toast(added.length === 1 ? 'new: ' + added[0].id + ' \u00b7 ' + added[0].label : added.length + ' new objects added');
+        setTimeout(function () { if (state.page === 'network') render(); }, 6200);  // let the pulse fade
+      }
       sig = s; DATA = d; index();
       setPage(state.page);
       if (state.selected && byId[state.selected]) renderPanel();
+      else if (state.showingDest) renderProjectPanel();
       loadSuggestions(false);
     });
   }
   function setLive(on) {
-    liveOn = on; store('live', on); liveBtn.classList.toggle('on', on);
-    clearInterval(liveTimer); if (on) liveTimer = setInterval(function () { refresh(false); }, 5000);
+    liveOn = on; store('live2', on); liveBtn.classList.toggle('on', on);
+    liveBtn.title = on ? 'Live: updates appear on their own (click to pause)' : 'Paused: click to show updates live again';
+    clearInterval(liveTimer); if (on) { pollStamp(); liveTimer = setInterval(pollStamp, 2000); }
   }
   liveBtn.onclick = function () { setLive(!liveOn); };
 
@@ -1378,9 +2031,26 @@
     if (qs.group) { state.groupBy = qs.group; grpSel.value = qs.group; }
     grpSel.value = state.groupBy;
     if (qs.theme === 'dark' || qs.theme === 'light') document.documentElement.setAttribute('data-theme', qs.theme);
-    setPage(['network', 'articles', 'history'].indexOf(qs.page) >= 0 ? qs.page : 'network');
+    if (qs.page === 'analyses') { qs.page = 'history'; histMode = 'analyses'; }
+    if (qs.analysis && A()[qs.analysis]) {  // ?analysis=<key> opens that analysis in the guide
+      qs.page = 'history'; histMode = 'analyses';
+      var path = [], cur = qs.analysis;
+      while (cur) { path.unshift(cur); cur = A()[cur].parent; }
+      guide.path = path;
+      path.forEach(function (k) { if (A()[k].hidden) guide.peek[k] = true; });  // a link to a hidden item peeks it
+    }
+    // an empty network with an analysis history opens on the guide
+    var dflt = !DATA.nodes.length && Object.keys(DATA.analyses || {}).length ? 'history' : 'network';
+    var startPage = ['network', 'articles', 'history'].indexOf(qs.page) >= 0 ? qs.page : dflt;
+    // open the project panel BEFORE the first drawing: the network is then laid out for the width it
+    // really has (otherwise it is drawn full-width, squeezed when the panel opens, and jumps on redraw)
+    if (LIVE && !state.selected && qs.panel !== 'suggestions' && startPage === 'network') renderProjectPanel();
+    setPage(startPage);
     if (state.selected) renderPanel();
-    if (LIVE) { setLive(liveOn); loadSuggestions(qs.panel === 'suggestions'); }
+    if (LIVE) {
+      setLive(liveOn); loadSuggestions(qs.panel === 'suggestions'); pollJobs();
+      document.getElementById('dest-hint').hidden = false;
+    }
   }
   if (window.SCIWEAVE_DATA) boot(window.SCIWEAVE_DATA);
   else fetch('api/graph').then(function (r) { return r.json(); }).then(boot)

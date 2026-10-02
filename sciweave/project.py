@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
+import re
 import shutil
 from pathlib import Path
 
@@ -46,6 +48,17 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+# full-content hashes are expensive (seconds per file over a network share); remember them by
+# (path, size, mtime) so a file is only re-read when it actually changed. Persisted per project
+# in .sciweave/fpcache.json (Project.load_fp_cache / save_fp_cache).
+_FP_MEMO: dict[str, str] = {}
+_FP_DIRTY = [False]
+
+
+def _memo_key(path: Path, st) -> str:
+    return f"{os.path.normcase(str(path))}|{st.st_size}|{st.st_mtime_ns}"
+
+
 def fingerprint(path: Path) -> dict:
     """Identity of a file or directory *now*: {hash, size, kind, exact}.
 
@@ -70,7 +83,17 @@ def fingerprint(path: Path) -> dict:
         raw = f"{st.st_size}|{int(st.st_mtime)}".encode()
         return {"hash": "fp:" + hashlib.sha256(raw).hexdigest(), "size": st.st_size, "kind": "file",
                 "exact": False, "mtime": st.st_mtime_ns}
-    return {"hash": sha256_file(path), "size": st.st_size, "kind": "file", "exact": True, "mtime": st.st_mtime_ns}
+    key = _memo_key(path, st)
+    # a file modified in the last seconds may change again within the same timestamp (same size, same
+    # mtime): never trust or store a remembered hash for it ("racy" files, as git calls them)
+    fresh = time.time() - st.st_mtime < 3
+    digest = None if fresh else _FP_MEMO.get(key)
+    if digest is None:
+        digest = sha256_file(path)
+        if not fresh:
+            _FP_MEMO[key] = digest
+            _FP_DIRTY[0] = True
+    return {"hash": digest, "size": st.st_size, "kind": "file", "exact": True, "mtime": st.st_mtime_ns}
 
 
 def unchanged_since(path: Path, version: dict) -> bool:
@@ -97,6 +120,28 @@ class Project:
         self.graph: dict = {}
         if self.graph_file.exists():
             self.load()
+            self.load_fp_cache()
+
+    def load_fp_cache(self) -> None:
+        f = self.state / "fpcache.json"
+        if f.exists():
+            try:
+                _FP_MEMO.update(json.loads(f.read_text(encoding="utf-8")))
+            except (ValueError, OSError):
+                pass
+
+    def save_fp_cache(self) -> None:
+        if not _FP_DIRTY[0]:
+            return
+        f = self.state / "fpcache.json"
+        try:
+            keep = {k: v for k, v in _FP_MEMO.items()}
+            tmp = f.with_name(f"fpcache.json.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(keep), encoding="utf-8")
+            self._retry(lambda: os.replace(tmp, f))
+            _FP_DIRTY[0] = False
+        except OSError:
+            pass
 
     # ---------------------------------------------------------- lifecycle ----
     @classmethod
@@ -121,6 +166,7 @@ class Project:
             "edges": [],
             "groups": {},
             "steps": {},
+            "analyses": {},
         }
         p.save_graph()
         p.log("project_created", detail=p.graph["project"]["name"])
@@ -137,22 +183,41 @@ class Project:
             f"no SciWeave project found at or above {here} (run `sciweave init` first, or pass --project)"
         )
 
+    @staticmethod
+    def _retry(fn, attempts: int = 40, wait: float = 0.05):
+        """Windows: replacing or reading graph.json fails with PermissionError for a moment while
+        another thread / process has it open (the dashboard reads it constantly). Retry briefly."""
+        import time
+        for i in range(attempts):
+            try:
+                return fn()
+            except PermissionError:
+                if i == attempts - 1:
+                    raise
+                time.sleep(wait)
+
     def load(self) -> None:
-        self.graph = json.loads(self.graph_file.read_text(encoding="utf-8"))
+        self.graph = json.loads(self._retry(lambda: self.graph_file.read_text(encoding="utf-8")))
         self.graph.setdefault("counters", {})
         self.graph.setdefault("groups", {})
         self.graph.setdefault("steps", {})
+        self.graph.setdefault("analyses", {})
 
     def save_graph(self) -> None:
         self.state.mkdir(parents=True, exist_ok=True)
-        tmp = self.graph_file.with_suffix(".json.tmp")
+        import threading
+        # one temp file per writer (process + thread), so two saves at once never share it
+        tmp = self.graph_file.with_name(f"graph.json.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(self.graph, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         if self.graph_file.exists():
-            shutil.copy2(self.graph_file, self.graph_file.with_suffix(".json.bak"))
-        os.replace(tmp, self.graph_file)
+            self._retry(lambda: shutil.copy2(self.graph_file, self.graph_file.with_suffix(".json.bak")))
+        self._retry(lambda: os.replace(tmp, self.graph_file))
 
     def commit(self) -> None:
-        """Persist graph + regenerate SCIWEAVE.md. Call after any mutation."""
+        """Persist graph + regenerate SCIWEAVE.md. Call after any mutation.
+        Organized copies follow their object's step / group first."""
+        if self.destination is not None:
+            self.sync_organized()
         self.save_graph()
         self.write_map()
 
@@ -191,6 +256,374 @@ class Project:
             n += 1
         self.graph["counters"][prefix] = n
         return f"{prefix}{n}"
+
+
+    # ---------------------------------------------------------- organize ----
+    # The organized copy: the project's *destination* folder (e.g. D:\study) mirrors the
+    # network. Each object can be copied there ("save to destination"); its folder is
+    #     <destination>/<NN_step label>/[<custom group>/]<name>
+    # so the folder tree follows the network's grouping, and when an object moves to
+    # another step or group its copy is moved too (on every commit). The record keeps
+    # the source and its fingerprint at copy time, so a later change of the source is
+    # reported ("source changed") and can be pulled in by copying again.
+
+    BIG_BYTES = 4 * 1024 ** 3  # "large data": asked one by one before copying, never copied by "save all"
+
+    def node_size(self, node_id: str) -> int | None:
+        v = self.node(node_id).get("versions") or []
+        return v[-1].get("size") if v else None
+
+    def is_big(self, node_id: str) -> bool:
+        return (self.node_size(node_id) or 0) > self.BIG_BYTES
+
+    def set_organize_skip(self, node_id: str, skip: bool = True, actor: str = "user") -> None:
+        """A "no" to copying a large object during "save all": remembered, so it is not asked again
+        (it can still be copied on its own at any time)."""
+        n = self.node(node_id)
+        if skip:
+            n["organize_skip"] = True
+        else:
+            n.pop("organize_skip", None)
+        self.log("organize_skip" if skip else "organize_unskip", node=node_id, actor=actor)
+
+    @property
+    def destination(self) -> Path | None:
+        d = self.graph["project"].get("destination")
+        return Path(d) if d else None
+
+    def set_destination(self, path: str | None, actor: str = "user") -> Path | None:
+        if path:
+            dest = Path(str(path).strip().strip('"')).expanduser()
+            if not dest.is_absolute():
+                raise SciWeaveError("give the destination as a full path, e.g. D:\\my_study")
+            dest.mkdir(parents=True, exist_ok=True)
+            self.graph["project"]["destination"] = str(dest)
+        else:
+            self.graph["project"].pop("destination", None)
+        self.log("destination_set", detail=str(path or "(none)"), actor=actor)
+        return self.destination
+
+    @staticmethod
+    def _folder_name(text: str) -> str:
+        s = re.sub(r"[^\w\-]+", "_", text.strip()).strip("_")
+        return s[:60] or "item"
+
+    def organized_folder(self, node_id: str) -> str:
+        """Relative folder inside the destination that matches the node's grouping now."""
+        n = self.node(node_id)
+        st = self.steps.get(n.get("step") or "")
+        parts = [f"{int(st.get('order', 0)):02d}_{self._folder_name(st['label'])}" if st else "00_No_step"]
+        if n.get("groups"):
+            g = n["groups"][0]
+            parts.append(self._folder_name((self.graph["groups"].get(g) or {}).get("label") or g))
+        return "/".join(parts)
+
+    def _organized_name(self, node_id: str, src: Path) -> str:
+        n = self.node(node_id)
+        name = f"{node_id}_{self._folder_name(n['label'])}" if src.is_dir() else src.name
+        folder = self.organized_folder(node_id)
+        taken = {(o.get("organized") or {}).get("path") for k, o in self.nodes.items() if k != node_id}
+        if f"{folder}/{name}" in taken:  # two objects with the same file name in one folder
+            name = f"{node_id}_{name}"
+        return name
+
+    def organize_copy(self, node_id: str, progress=None) -> dict:
+        """Copy (or re-copy) one object into the destination. Returns the record; the caller
+        stores it with organize_record() (split so a long copy can run without a lock)."""
+        dest = self.destination
+        if dest is None:
+            raise SciWeaveError("no destination set for this project (sciweave destination <folder>)")
+        n = self.node(node_id)
+        if not n.get("path"):
+            raise SciWeaveError(f"{node_id} has no file to copy (a conceptual object)")
+        src = self.resolve(n["path"])
+        if not src.exists():
+            raise SciWeaveError(f"source not reachable: {src}")
+        old = n.get("organized") or {}
+        name = old.get("name") or self._organized_name(node_id, src)
+        rel = f"{self.organized_folder(node_id)}/{name}"
+        target = dest / rel
+        try:
+            target.resolve().relative_to(src.resolve())
+            raise SciWeaveError(f"the destination lies inside the source {src}; choose another destination")
+        except ValueError:
+            pass
+        if old.get("path") and old["path"] != rel and (dest / old["path"]).exists() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dest / old["path"]), str(target))
+            if old.get("sidecar") and (dest / old["sidecar"]).exists():
+                shutil.move(str(dest / old["sidecar"]), str(self._sidecar_of(target)))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fp = fingerprint(src)
+        lines = []
+        files = sorted(x for x in src.rglob("*") if x.is_file()) if src.is_dir() else [src]
+        total = 2 * sum(x.stat().st_size for x in files)  # every byte is read twice: copy + check
+        done = [0]
+
+        def tick(nbytes, phase):
+            done[0] += nbytes
+            if progress:
+                progress(done[0], total, phase)
+        if progress:
+            progress(0, total, "copying")
+        stale = target.with_name(target.name + ".sciweave-part")  # leftovers of an interrupted copy
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+        elif stale.exists():
+            stale.unlink()
+        if src.is_dir():
+            # copy into a temporary folder, verify every file, then swap it in (files removed at the source go too)
+            tmp = target.with_name(target.name + ".sciweave-part")
+            if tmp.exists():
+                shutil.rmtree(tmp)
+            for f in files:
+                rel_f = f.relative_to(src).as_posix()
+                (tmp / rel_f).parent.mkdir(parents=True, exist_ok=True)
+                lines.append(f"{self._copy_verified(f, tmp / rel_f, tick)}  {target.name}/{rel_f}")
+            if target.exists():
+                old_dir = target.with_name(target.name + ".sciweave-old")
+                os.replace(target, old_dir)
+                os.replace(tmp, target)
+                shutil.rmtree(old_dir, ignore_errors=True)
+            else:
+                os.replace(tmp, target)
+        else:
+            lines.append(f"{self._copy_verified(src, target, tick)}  {target.name}")
+        manifest = "\n".join(lines) + "\n"
+        side = self._sidecar_of(target)
+        side.write_text(manifest, encoding="utf-8")  # sha256sum format: check with `sha256sum -c` from its folder
+        return {"path": rel, "name": name, "source": str(src), "source_hash": fp["hash"], "size": fp["size"],
+                "source_mtime": src.stat().st_mtime_ns if src.is_file() else None,
+                "kind": fp["kind"], "copied": now_iso(), "sidecar": f"{self.organized_folder(node_id)}/{side.name}",
+                "sha256": hashlib.sha256(manifest.encode()).hexdigest(), "files": len(lines), "verified": now_iso()}
+
+    @staticmethod
+    def _sidecar_of(target: Path) -> Path:
+        return target.with_name(target.name + ".sha256")
+
+    @staticmethod
+    def _hash_file(path: Path, tick=None, phase: str = "checking") -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(8 * 1024 * 1024), b""):
+                h.update(chunk)
+                if tick:
+                    tick(len(chunk), phase)
+        return h.hexdigest()
+
+    @staticmethod
+    def _copy_verified(src: Path, dst: Path, tick=None) -> str:
+        """Copy one file while hashing the source, re-read the copy and compare; only a copy whose
+        SHA-256 equals the source's replaces the old one. Returns the SHA-256."""
+        tmp = dst.with_name(dst.name + ".sciweave-part")
+        h = hashlib.sha256()
+        with open(src, "rb") as fi, open(tmp, "wb") as fo:
+            for chunk in iter(lambda: fi.read(8 * 1024 * 1024), b""):
+                h.update(chunk)
+                fo.write(chunk)
+                if tick:
+                    tick(len(chunk), "copying")
+        shutil.copystat(src, tmp)
+        digest = h.hexdigest()
+        if Project._hash_file(tmp, tick, "checking") != digest:
+            tmp.unlink(missing_ok=True)
+            raise SciWeaveError(f"the copy of {src.name} does not match its source (SHA-256) and was not saved")
+        os.replace(tmp, dst)
+        return digest
+
+    @staticmethod
+    def _total_size(p: Path) -> tuple[int, int]:
+        if p.is_file():
+            return p.stat().st_size, 1
+        if p.is_dir():
+            fs = [f for f in p.rglob("*") if f.is_file()]
+            return sum(f.stat().st_size for f in fs), len(fs)
+        return 0, 0
+
+    def organized_check(self, node_id: str) -> dict:
+        """Quick check before saving again: sizes of source and copy (cheap), and whether the source
+        changed since it was copied. No file content is read."""
+        n = self.node(node_id)
+        rec = n.get("organized")
+        if not rec:
+            return {"copied": False}
+        dst = self.destination / rec["path"] if self.destination else None
+        src = Path(rec["source"])
+        ss, sn = self._total_size(src)
+        ds, dn = self._total_size(dst) if dst else (0, 0)
+        state = self.organized_state(node_id)
+        return {"copied": True, "state": state, "source_size": ss, "copy_size": ds, "source_files": sn, "copy_files": dn,
+                "same_size": ss == ds and sn == dn, "has_checksum": bool(rec.get("sidecar")),
+                "copied_at": rec.get("copied"), "verified_at": rec.get("verified"),
+                "up_to_date": state == "ok" and ss == ds and sn == dn}
+
+    def verify_copy(self, node_id: str, progress=None) -> dict:
+        """Re-read the copy at the destination and check it against its checksum file. A copy made
+        before checksums existed is compared with its source instead, and gets a checksum file."""
+        n = self.node(node_id)
+        rec = n.get("organized")
+        if not rec or self.destination is None:
+            raise SciWeaveError(f"{node_id} has no organized copy")
+        dest = self.destination
+        target = dest / rec["path"]
+        if not target.exists():
+            return {"ok": False, "checked": 0, "bad": [], "missing": [rec["path"]], "message": "the copy is missing"}
+        side = dest / rec["sidecar"] if rec.get("sidecar") else None
+        done = [0]
+
+        def tick(nbytes, phase):
+            done[0] += nbytes
+            if progress:
+                progress(done[0], total[0], phase)
+        total = [sum(f.stat().st_size for f in ([target] if target.is_file() else [x for x in target.rglob("*") if x.is_file()]))]
+        if side and side.exists():
+            bad, missing, checked = [], [], 0
+            for line in side.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                digest, _, name = line.partition("  ")
+                f = target.parent / name
+                if not f.exists():
+                    missing.append(name)
+                    continue
+                checked += 1
+                if self._hash_file(f, tick) != digest:
+                    bad.append(name)
+            ok = not bad and not missing
+            return {"ok": ok, "checked": checked, "bad": bad, "missing": missing, "wrote_checksum": False,
+                    "message": f"{checked} file(s) match the checksum" if ok
+                    else f"{len(bad)} changed, {len(missing)} missing (of {checked + len(missing)})"}
+        # older copy without a checksum file: compare with the source, then write one
+        src = Path(rec["source"])
+        pairs = ([(src, target, target.name)] if target.is_file() else
+                 [(s, target / s.relative_to(src), f"{target.name}/{s.relative_to(src).as_posix()}")
+                  for s in sorted(x for x in src.rglob("*") if x.is_file())])
+        lines, bad, missing = [], [], []
+        for s, d, name in pairs:
+            if not d.exists():
+                missing.append(name)
+                continue
+            hd = self._hash_file(d, tick)
+            if not s.exists() or sha256_file(s) != hd:
+                bad.append(name)
+            lines.append(f"{hd}  {name}")
+        ok = not bad and not missing
+        out = {"ok": ok, "checked": len(lines), "bad": bad, "missing": missing, "wrote_checksum": False}
+        if ok:
+            manifest = "\n".join(lines) + "\n"
+            sc = self._sidecar_of(target)
+            sc.write_text(manifest, encoding="utf-8")
+            out.update(wrote_checksum=True, sidecar=f"{self.organized_folder(node_id)}/{sc.name}",
+                       sha256=hashlib.sha256(manifest.encode()).hexdigest(),
+                       message=f"{len(lines)} file(s) identical to the source; checksum file written")
+        else:
+            out["message"] = f"differs from the source: {len(bad)} changed, {len(missing)} missing"
+        return out
+
+    def record_verification(self, node_id: str, res: dict, actor: str = "user") -> None:
+        rec = self.node(node_id).get("organized") or {}
+        if res.get("ok"):
+            rec["verified"] = now_iso()
+            if res.get("wrote_checksum"):
+                rec["sidecar"], rec["sha256"], rec["files"] = res["sidecar"], res["sha256"], res["checked"]
+        self.log("organized_verified" if res.get("ok") else "organized_verify_failed", node=node_id,
+                 detail=res.get("message", ""), actor=actor)
+
+    def organize_record(self, node_id: str, rec: dict, actor: str = "user") -> None:
+        n = self.node(node_id)
+        again = bool(n.get("organized"))
+        n["organized"] = rec
+        n.pop("organize_skip", None)  # copied after all: no longer skipped
+        self.log("organized_copy", node=node_id, detail=("updated " if again else "") + rec["path"], actor=actor)
+
+    def organize(self, node_id: str, actor: str = "user") -> dict:
+        rec = self.organize_copy(node_id)
+        self.organize_record(node_id, rec, actor=actor)
+        return rec
+
+    def sync_organized(self) -> list[tuple[str, str, str]]:
+        """Move organized copies whose step / group changed so the folders keep matching
+        the network. Returns [(id, old, new)]; empty folders left behind are removed."""
+        dest = self.destination
+        moved = []
+        if dest is None:
+            return moved
+        for nid, n in self.nodes.items():
+            rec = n.get("organized")
+            if not rec:
+                continue
+            want = f"{self.organized_folder(nid)}/{rec['name']}"
+            if want == rec["path"]:
+                continue
+            src, dst = dest / rec["path"], dest / want
+            if src.exists() and not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                if rec.get("sidecar") and (dest / rec["sidecar"]).exists():
+                    shutil.move(str(dest / rec["sidecar"]), str(self._sidecar_of(dst)))
+                old_parent = src.parent
+                while old_parent != dest and old_parent.exists() and not any(old_parent.iterdir()):
+                    old_parent.rmdir()
+                    old_parent = old_parent.parent
+            moved.append((nid, rec["path"], want))
+            rec["path"] = want
+            if rec.get("sidecar"):
+                rec["sidecar"] = f"{self.organized_folder(nid)}/{self._sidecar_of(Path(want)).name}"
+        for nid, a, b in moved:
+            self.log("organized_moved", node=nid, detail=f"{a} -> {b}", actor="sciweave")
+        return moved
+
+    def organized_state(self, node_id: str) -> str | None:
+        """ok | source_changed | copy_missing | source_missing, or None if never copied."""
+        n = self.node(node_id)
+        rec = n.get("organized")
+        if not rec:
+            return None
+        if self.destination is None or not (self.destination / rec["path"]).exists():
+            return "copy_missing"
+        src = Path(rec["source"])
+        if not src.exists():
+            return "source_missing"
+        if rec.get("source_mtime") and src.is_file():  # cheap: same size and time as when copied = unchanged
+            st = src.stat()
+            if st.st_size == rec.get("size") and st.st_mtime_ns == rec["source_mtime"]:
+                return "ok"
+        return "ok" if fingerprint(src)["hash"] == rec["source_hash"] else "source_changed"
+
+    # ---------------------------------------------------------- relocate ----
+    def relocate(self, old: str, new: str, dry_run: bool = False, actor: str = "user") -> list[tuple[str, str, str]]:
+        """Data moved (e.g. C:\\...\\study -> D:\\study): rewrite every node path and analysis path
+        that starts with `old` to start with `new`. Slash style and (on Windows) case are ignored
+        when matching; the rest of each path is kept. Returns [(where, before, after)]."""
+        def norm(s: str) -> str:
+            s = s.replace("\\", "/").rstrip("/")
+            return s.lower() if os.name == "nt" else s
+        o, nw = norm(old), new.replace("\\", "/").rstrip("/")
+
+        def move(path: str):
+            if not isinstance(path, str):
+                return None
+            p = path.replace("\\", "/")
+            if norm(p) == o or norm(p).startswith(o + "/"):
+                return nw + p[len(o):]
+            return None
+        changes = []
+        for nid, n in self.nodes.items():
+            to = move(n.get("path"))
+            if to:
+                changes.append((nid, n["path"], to))
+                if not dry_run:
+                    n["path"] = to
+        for k, a in self.analyses.items():
+            for i, ap in enumerate(a.get("paths") or []):
+                to = move(ap)
+                if to:
+                    changes.append((f"analysis {k}", ap, to))
+                    if not dry_run:
+                        a["paths"][i] = to
+        if changes and not dry_run:
+            self.log("relocated", detail=f"{old} -> {new}: {len(changes)} path(s)", actor=actor)
+        return changes
 
     # ----------------------------------------------------------- history ----
     def log(self, event: str, node: str | None = None, edge: str | None = None,
@@ -659,6 +1092,279 @@ class Project:
             del out[None]
         return out
 
+    # ---------------------------------------------------------- analyses ----
+    # The analysis history: a tree of what was done, starting from the raw / input
+    # data, each analysis with its children (sub-analyses, reruns, fixes). It is the
+    # guide for a project ("what did we do, in what order, and why"), independent of
+    # whether its files are in the network yet. Each entry can point at network
+    # objects (`nodes`) and at a step, and is marked `organized` once its objects
+    # have been recorded.
+
+    ANALYSIS_STATUS = ("done", "open", "superseded", "planned")
+    ANALYSIS_FIELDS = ("title", "parent", "order", "summary", "status", "start", "end", "params",
+                       "tools", "paths", "feeds", "issue", "group", "step", "nodes", "organized", "hidden", "history")
+
+    @property
+    def analyses(self) -> dict:
+        return self.graph.setdefault("analyses", {})
+
+    def analysis(self, key: str) -> dict:
+        a = self.analyses.get(key)
+        if a is None:
+            raise SciWeaveError(f"unknown analysis '{key}' (see `sciweave analysis ls`)")
+        return a
+
+    def set_analysis(self, key: str, actor: str = "user", log: bool = True, **fields) -> dict:
+        """Create or update one analysis. Unknown fields are refused; None leaves a field as is."""
+        key = key.strip()
+        if not key or any(c.isspace() for c in key):
+            raise SciWeaveError("analysis key must be one word, e.g. 'raw' or 'meta.mrmega'")
+        bad = set(fields) - set(self.ANALYSIS_FIELDS)
+        if bad:
+            raise SciWeaveError(f"unknown analysis field(s): {', '.join(sorted(bad))}")
+        a = self.analyses.get(key)
+        is_new = a is None
+        if is_new:
+            a = {"title": key, "parent": None, "summary": "", "status": "done", "history": [], "nodes": [],
+                 "organized": False, "created": now_iso()}
+        for k, v in fields.items():
+            if v is None:
+                continue
+            if k == "status" and v not in self.ANALYSIS_STATUS:
+                raise SciWeaveError(f"status must be one of {', '.join(self.ANALYSIS_STATUS)}")
+            if k == "parent" and v:
+                if v not in self.analyses:
+                    raise SciWeaveError(f"unknown parent analysis '{v}'")
+                cur = v
+                while cur:
+                    if cur == key:
+                        raise SciWeaveError(f"'{v}' is '{key}' or inside it: that would make a loop")
+                    cur = self.analyses.get(cur, {}).get("parent")
+            if k == "nodes":
+                for nid in v:
+                    self.node(nid)
+            a[k] = (v or None) if k == "parent" else v
+        if "order" not in a:
+            sib = [x.get("order", 0) for kk, x in self.analyses.items() if kk != key and x.get("parent") == a["parent"]]
+            a["order"] = max(sib + [0]) + 1
+        a["updated"] = now_iso()
+        self.analyses[key] = a
+        if log:
+            self.log("analysis_added" if is_new else "analysis_updated", detail=f"{key}: {a['title']}", actor=actor,
+                     analysis=key)
+        return a
+
+    def log_analysis(self, key: str, text: str, date: str | None = None, actor: str = "user") -> dict:
+        """Add a dated event to an analysis' own history (kept sorted by date)."""
+        a = self.analysis(key)
+        ev = {"date": (date or now_iso()[:10]), "text": text.strip()}
+        a.setdefault("history", []).append(ev)
+        a["history"].sort(key=lambda e: e.get("date", ""))
+        a["updated"] = now_iso()
+        self.log("analysis_logged", detail=f"{key}: {text[:120]}", actor=actor, analysis=key)
+        return ev
+
+    def remove_analysis(self, key: str, actor: str = "user") -> dict:
+        """Remove one analysis; its children move up to its parent."""
+        a = self.analysis(key)
+        for x in self.analyses.values():
+            if x.get("parent") == key:
+                x["parent"] = a.get("parent")
+        del self.analyses[key]
+        self.log("analysis_removed", detail=f"{key}: {a['title']}", actor=actor, analysis=key)
+        return a
+
+    def rename_analysis(self, old: str, new: str, subtree: bool = True, actor: str = "user") -> dict[str, str]:
+        """Change an analysis key. With subtree=True, branches whose keys start with
+        "<old>." are renamed to "<new>." too. Parents and every @key reference in any
+        analysis text follow. Returns {old: new}."""
+        self.analysis(old)
+        new = new.strip()
+        if not new or any(c.isspace() for c in new):
+            raise SciWeaveError("analysis key must be one word")
+        mapping = {old: new}
+        if subtree:
+            for k in self.analyses:
+                if k.startswith(old + "."):
+                    mapping[k] = new + k[len(old):]
+        clash = [v for k, v in mapping.items() if v in self.analyses and v not in mapping]
+        if clash:
+            raise SciWeaveError(f"key(s) already in use: {', '.join(clash)}")
+        self.graph["analyses"] = {mapping.get(k, k): v for k, v in self.analyses.items()}
+
+        def sub(m):
+            return "@" + mapping.get(m.group(1), m.group(1))
+        for a in self.analyses.values():
+            if a.get("parent") in mapping:
+                a["parent"] = mapping[a["parent"]]
+            for f in ("summary", "issue", "feeds", "title", "params"):
+                if isinstance(a.get(f), str):
+                    a[f] = self.REF.sub(sub, a[f])
+            for h in a.get("history") or []:
+                h["text"] = self.REF.sub(sub, h.get("text", ""))
+        self.log("analysis_renamed", detail=", ".join(f"{k} → {v}" for k, v in mapping.items()), actor=actor)
+        return mapping
+
+    def analysis_children(self, key: str | None) -> list[str]:
+        kids = [k for k, a in self.analyses.items() if (a.get("parent") or None) == key]
+        return sorted(kids, key=lambda k: (self.analyses[k].get("order", 0), self.analyses[k].get("start") or "", k))
+
+    def analysis_tree(self) -> list[tuple[str, str, int]]:
+        """Depth-first (key, number like '2.3', depth) in guide order."""
+        out: list[tuple[str, str, int]] = []
+
+        def walk(parent, prefix, depth):
+            kids = self.analysis_children(parent)
+            # an entry with order 0 is numbered 0 ("before": e.g. an earlier round), the rest count from 1
+            zero = 1 if kids and self.analyses[kids[0]].get("order") == 0 else 0
+            for i, k in enumerate(kids, 1 - zero):
+                num = f"{prefix}{i}"
+                out.append((k, num, depth))
+                walk(k, num + ".", depth + 1)
+        walk(None, "", 0)
+        return out
+
+    # ------------------------------------------------------------- focus ----
+    # Hiding is for focus, never deletion: a hidden analysis (and its branches) drops
+    # out of view together with the objects that exist only for it. Objects are hidden
+    # when (1) marked hidden themselves, (2) listed in a hidden analysis, or (3) every
+    # consumer of them (outgoing links, or links that ran them as their script) is
+    # hidden — so raw inputs and scripts used only by hidden steps disappear too.
+    # Objects listed in a visible analysis, or explicitly unhidden, always stay visible.
+    # Links touching a hidden object are hidden; what comes next stays. Staleness is
+    # still computed over everything.
+
+    FOCUS_IGNORE_RELS = ("documents", "related")
+
+    def hidden_analyses(self) -> set[str]:
+        out = set()
+        for k in self.analyses:
+            cur = k
+            while cur:
+                if self.analyses.get(cur, {}).get("hidden"):
+                    out.add(k)
+                    break
+                cur = self.analyses.get(cur, {}).get("parent")
+        return out
+
+    def hide_analyses(self, keys, hidden: bool = True, actor: str = "user") -> list[str]:
+        done = []
+        for k in keys:
+            a = self.analysis(k)
+            if bool(a.get("hidden")) != hidden:
+                a["hidden"] = hidden
+                a["updated"] = now_iso()
+                done.append(k)
+        if done:
+            self.log("analyses_hidden" if hidden else "analyses_unhidden", detail=", ".join(done), actor=actor)
+        return done
+
+    def hide_nodes(self, node_ids, hidden: bool = True, actor: str = "user") -> list[str]:
+        """hidden=False pins an object visible even if a hidden analysis would hide it."""
+        done = []
+        for nid in node_ids:
+            n = self.node(nid)
+            if n.get("hidden") is not hidden:
+                n["hidden"] = hidden
+                done.append(nid)
+        if done:
+            self.log("nodes_hidden" if hidden else "nodes_unhidden", detail=", ".join(done), actor=actor, nodes=done)
+        return done
+
+    def hidden_nodes(self) -> dict[str, str]:
+        """Object id -> why it is hidden from view."""
+        hid_a = self.hidden_analyses()
+        pinned = {nid for nid, n in self.nodes.items() if n.get("hidden") is False}
+        for k, a in self.analyses.items():
+            if k not in hid_a:
+                pinned.update(a.get("nodes") or [])
+        out: dict[str, str] = {}
+        for nid, n in self.nodes.items():
+            if n.get("hidden") is True:
+                out[nid] = "hidden"
+        for k in sorted(hid_a):
+            for nid in self.analyses[k].get("nodes") or []:
+                if nid in self.nodes and nid not in pinned:
+                    out.setdefault(nid, f"part of hidden analysis {k}")
+        consumers: dict[str, list[str]] = {nid: [] for nid in self.nodes}
+        for e in self.edges:
+            if e["rel"] in self.FOCUS_IGNORE_RELS:
+                continue
+            consumers.setdefault(e["source"], []).append(e["target"])
+            if e.get("script") in consumers:
+                consumers[e["script"]].append(e["target"])
+        changed = True
+        while changed:
+            changed = False
+            for nid, cons in consumers.items():
+                if nid in out or nid in pinned or nid not in self.nodes or not cons:
+                    continue
+                if all(c in out for c in cons):
+                    out[nid] = "only used by hidden items"
+                    changed = True
+        return out
+
+    REF = re.compile(r"@([A-Za-z0-9_](?:[A-Za-z0-9_.\-]*[A-Za-z0-9_])?)")
+
+    def expand_refs(self, text: str) -> str:
+        """Analyses refer to each other as @key in their text (stable when the tree is
+        reordered); for reading, show the current number and title instead."""
+        num = {k: n for k, n, _ in self.analysis_tree()}
+
+        def sub(m):
+            k = m.group(1)
+            return f"{num[k]} “{self.analyses[k]['title']}”" if k in num else m.group(0)
+        return self.REF.sub(sub, text or "")
+
+    def import_analyses(self, entries: list[dict], replace: bool = False, actor: str = "user") -> int:
+        """Bulk-load a guide. Entries may nest children under "children" or name a "parent";
+        parents are created before children. replace=True clears the existing tree first.
+        All or nothing: on any error the tree is left as it was."""
+        flat: list[dict] = []
+
+        def flatten(items, parent):
+            for i, e in enumerate(items, 1):
+                e = dict(e)
+                kids = e.pop("children", []) or []
+                if parent is not None and not e.get("parent"):
+                    e["parent"] = parent
+                flat.append(e)
+                flatten(kids, e.get("key"))
+        flatten(entries, None)
+        # default order = position among its own siblings in the file (works for nested and flat lists)
+        seen: dict = {}
+        for e in flat:
+            seen[e.get("parent")] = seen.get(e.get("parent"), 0) + 1
+            e.setdefault("order", seen[e.get("parent")])
+        backup = json.loads(json.dumps(self.analyses))
+        try:
+            if replace:
+                self.graph["analyses"] = {}
+            keys = {e.get("key") for e in flat}
+            pending = list(flat)
+            while pending:
+                ready = [e for e in pending if not e.get("parent") or e["parent"] in self.analyses]
+                if not ready:
+                    missing = sorted({e["parent"] for e in pending} - keys)
+                    raise SciWeaveError("analyses with unknown parent(s): " + ", ".join(missing or ["(loop)"]))
+                for e in ready:
+                    pending.remove(e)
+                    e = dict(e)
+                    if not e.get("key"):
+                        raise SciWeaveError(f"every analysis needs a \"key\" (got {e.get('title', e)!r})")
+                    history = e.pop("history", None)
+                    k = e.pop("key")
+                    a = self.set_analysis(k, actor=actor, log=False, **e)
+                    if history is not None:
+                        a["history"] = sorted(({"date": str(h.get("date", "")), "text": h.get("text", "")}
+                                               if isinstance(h, dict) else {"date": "", "text": str(h)}
+                                               for h in history), key=lambda h: h["date"])
+        except Exception:
+            self.graph["analyses"] = backup
+            raise
+        self.log("analyses_imported", detail=f"{len(flat)} analyses" + (" (replaced)" if replace else ""), actor=actor)
+        return len(flat)
+
     # ------------------------------------------------------------ branches ----
     # A branch is an alternative version of an analysis that should live NEXT to the
     # original instead of overwriting it: other parameters (L=5 vs L=10), another
@@ -963,6 +1669,12 @@ class Project:
     # ------------------------------------------------------------ export ----
     def payload(self, check_disk: bool = True, history_limit: int = 2000) -> dict:
         """Everything the dashboard needs, in one JSON-able dict."""
+        try:
+            return self._payload(check_disk, history_limit)
+        finally:
+            self.save_fp_cache()
+
+    def _payload(self, check_disk: bool = True, history_limit: int = 2000) -> dict:
         st = self.status(check_disk=check_disk)
         edges = [{**e, "stale": self.edge_is_stale(e)} for e in self.edges]
         return {
@@ -973,6 +1685,12 @@ class Project:
             "edges": edges,
             "groups": self.graph["groups"],
             "steps": self.steps,
+            "analyses": self.analyses,
+            "hidden": self.hidden_nodes(),
+            "destination": str(self.destination) if self.destination else None,
+            "organized": {nid: {**n["organized"], "state": self.organized_state(nid),
+                                "folder": self.organized_folder(nid)}
+                          for nid, n in self.nodes.items() if n.get("organized")},
             "status": st,
             "types": NODE_TYPES,
             "relations": EDGE_RELATIONS,

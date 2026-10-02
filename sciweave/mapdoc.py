@@ -59,6 +59,29 @@ def render_map(p: "Project") -> str:
         if None in summ:
             lines += [f"**No step yet:** {', '.join(sorted(summ[None]['members']))}", ""]
 
+    if p.analyses:
+        tree = p.analysis_tree()
+        hid = p.hidden_analyses()
+        done = sum(1 for k, _, _ in tree if p.analyses[k].get("organized"))
+        lines += ["## Analysis history (the guide)", "",
+                  f"*{len(tree)} analyses · {done} organized into the network · "
+                  "`sciweave analysis show <key>` for one entry's full history*", ""]
+        for k, num, depth in tree:
+            a = p.analyses[k]
+            when = " → ".join(x for x in (a.get("start"), a.get("end")) if x)
+            flags = ([f"group: {a['group']}"] if a.get("group") else []) + [a.get("status", "")] + (["organized"] if a.get("organized") else []) + (["hidden"] if k in hid else [])
+            lines.append("  " * depth + f"- **{num} {_cell(a['title'])}** (`{k}`)"
+                         + (f" · {when}" if when else "") + f" · {', '.join(f for f in flags if f)}")
+            if a.get("summary"):
+                lines.append("  " * depth + f"  {_cell(p.expand_refs(a['summary']))}")
+            if a.get("issue"):
+                lines.append("  " * depth + f"  ⚠ {_cell(p.expand_refs(a['issue']))}")
+        lines.append("")
+
+    hidden_nodes = p.hidden_nodes()
+    if hidden_nodes:
+        lines += [f"**Hidden from view (focus, not deleted):** {', '.join(sorted(hidden_nodes))}", ""]
+
     for cat in CATEGORIES:
         rows = [n for n in p.nodes.values() if NODE_TYPES[n["type"]]["category"] == cat]
         if not rows:

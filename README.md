@@ -120,6 +120,7 @@ cd sciweave-demo
 sciweave status                   # 9 items stale after an upstream covariate change
 sciweave trace F1                 # how the Manhattan plot was made
 sciweave serve                    # dashboard at http://127.0.0.1:8765
+sciweave open                     # home page: every project on this machine, click one to open it
 ```
 
 Already have a project? Adopt it **in place**. Nothing is moved; SciWeave adds only `.sciweave/`
@@ -201,6 +202,12 @@ sciweave branch main T3 --why "L=5 matches the number of independent signals"
 `sciweave serve` opens a local dashboard. `sciweave export` writes the same thing as one
 offline HTML file you can share.
 
+**All your projects in one place.** Every project you `init` (or `projects add`) is listed in
+your SciWeave home, `~/Documents/SciWeave/`, as `projects.json` plus a readable `PROJECTS.md`
+that Claude reads to find a project by name. `sciweave open` serves a home page with one card
+per project (objects, figures and tables, steps, what's stale, last activity), and each card
+opens that project's network. `sciweave open <id>` goes straight to one project.
+
 <p align="center">
   <img src="docs/img/lineage-all.png" alt="Whole-project lineage: every data source on the left flowing through pipelines and scripts to tables, figures and the article on the right" width="100%">
 </p>
@@ -268,7 +275,13 @@ re-render (`save --no-refresh`) doesn't clear staleness. Details are in [DESIGN.
 
 | | |
 |---|---|
-| `init [--bare]` | create a project, or adopt an existing one in place |
+| `init [--bare]` | create a project, or adopt an existing one in place (listed in your SciWeave home) |
+| `open [id]` · `projects [ls\|add <path>\|rm <id>\|where]` | home dashboard of all your projects · manage that list |
+| `analysis [ls\|show\|add\|log\|link\|done\|import]` | the analysis history: a numbered tree from raw data to article, each with summary, dates, params and its own history |
+| `analysis hide\|unhide <key>` · `hide\|unhide <IDs>` | focus: hide part of the history with the files, scripts and links that exist only for it (never deleted) |
+| `destination [folder]` · `organize [IDs\|--all]` | where the organized copy lives · copy objects there in folders that mirror the network (double-click in the dashboard) |
+| `relocate <old> <new> [--dry-run]` | data moved: rewrite every path under the old folder |
+| `dedup [scan\|check <path>\|merge <keep> <dup>]` | one file, one node: find bit-identical files, check before adding, merge duplicates |
 | `step define <key> "<label>" --order N` · `step set <key> <IDs>` · `step ls` | analysis steps: each object belongs to one, shown as ovals |
 | `add <type> "<label>" [path] [--copy\|--ref]` | add a node (copied + versioned, or referenced) |
 | `link A B --rel produces -p L=10 --script SC1 --cmd "…"` | record provenance with parameters |

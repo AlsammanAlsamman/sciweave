@@ -9,6 +9,9 @@
   data nodes record the versions of their effective parents (through process nodes);
   process nodes are flagged when an input changed since their outputs were built;
   `part_of` compares placed version vs final/current; `documents`/`related` never propagate.
+- The SciWeave home (`registry.py`, default `~/Documents/SciWeave/`) lists every project;
+  `sciweave open` serves `dashboard/home.html` at `/` and each project under `/p/<id>/`.
+  Tests isolate it with an autouse `SCIWEAVE_HOME` fixture; keep dashboard URLs relative.
 - Core is stdlib-only. `anthropic` is optional (`sciweave[ai]`), imported lazily in `ai.py`.
 - Dashboard = `sciweave/dashboard/{index.html,style.css,app.js}` + vendored D3, inlined by
   `export.py` (no CDN, works offline). Plain ES5, no build step. Colors are CSS tokens with
