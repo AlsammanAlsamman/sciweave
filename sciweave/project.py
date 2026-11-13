@@ -59,13 +59,66 @@ def _memo_key(path: Path, st) -> str:
     return f"{os.path.normcase(str(path))}|{st.st_size}|{st.st_mtime_ns}"
 
 
-def fingerprint(path: Path) -> dict:
+# Listing a big folder on a network share costs one round trip per file (97 s for a 17,000-file
+# fine-mapping results tree), and the dashboard asks for every folder's state on each refresh.
+# Folder fingerprints of REMOTE paths are therefore reused for REMOTE_DIR_TTL seconds; local
+# folders are always fingerprinted fresh, and copies always re-read (fresh=True).
+REMOTE_DIR_TTL = 600
+
+
+def is_remote(path) -> bool:
+    s = str(path)
+    return s.startswith("\\\\") or s.startswith("//")
+
+
+_REFRESHING: set = set()
+
+
+def _ttl_get(key: str, refresh=None):
+    """A remembered remote fingerprint. When it is older than REMOTE_DIR_TTL it is still returned
+    (stale-while-revalidate) and `refresh` is run once in a background thread to renew it, so a
+    dashboard refresh never waits for a walk of a network share."""
+    hit = _FP_MEMO.get(key)
+    if not hit:
+        return None
+    try:
+        d = json.loads(hit)
+    except ValueError:
+        return None
+    if time.time() - d["ts"] >= REMOTE_DIR_TTL and refresh is not None and key not in _REFRESHING:
+        import threading
+        _REFRESHING.add(key)
+
+        def run():
+            try:
+                refresh()
+            except Exception:  # noqa: BLE001 - a failed background refresh keeps the old value
+                pass
+            finally:
+                _REFRESHING.discard(key)
+        threading.Thread(target=run, daemon=True).start()
+    return d["fp"]
+
+
+def _ttl_put(key: str, fp: dict) -> dict:
+    _FP_MEMO[key] = json.dumps({"ts": time.time(), "fp": fp})
+    _FP_DIRTY[0] = True
+    return fp
+
+
+def fingerprint(path: Path, fresh: bool = True) -> dict:
     """Identity of a file or directory *now*: {hash, size, kind, exact}.
 
     exact=False means the hash is a cheap size/mtime fingerprint (huge files,
     directories): good enough to notice change, not to restore content.
+    fresh=False (status displays only) lets a remote directory's fingerprint be up to REMOTE_DIR_TTL seconds old.
     """
     if path.is_dir():
+        key = "dir|" + os.path.normcase(str(path))
+        if not fresh and is_remote(path):
+            hit = _ttl_get(key, refresh=lambda: fingerprint(path, fresh=True))
+            if hit:
+                return hit
         h = hashlib.sha256()
         total = 0
         count = 0
@@ -77,7 +130,8 @@ def fingerprint(path: Path) -> dict:
                 total += st.st_size
                 h.update(f"{p.relative_to(path).as_posix()}|{st.st_size}|{int(st.st_mtime)}\n".encode())
                 count += 1
-        return {"hash": "dir:" + h.hexdigest(), "size": total, "kind": "dir", "exact": False}
+        fp = {"hash": "dir:" + h.hexdigest(), "size": total, "kind": "dir", "exact": False}
+        return _ttl_put(key, fp) if is_remote(path) else fp
     st = path.stat()
     if st.st_size > MAX_HASH_BYTES:
         raw = f"{st.st_size}|{int(st.st_mtime)}".encode()
@@ -104,7 +158,7 @@ def unchanged_since(path: Path, version: dict) -> bool:
         st = path.stat()
         if st.st_size == version.get("size") and st.st_mtime_ns == version["mtime"]:
             return True
-    return fingerprint(path)["hash"] == version["hash"]
+    return fingerprint(path, fresh=False)["hash"] == version["hash"]
 
 
 # ---------------------------------------------------------------- project ----
@@ -319,13 +373,74 @@ class Project:
         return "/".join(parts)
 
     def _organized_name(self, node_id: str, src: Path) -> str:
+        """File name of the copy inside its folder. Two objects whose files share a name in one
+        folder (five runs' metal.simple.tsv.gz) each get their id as prefix. Decided from what
+        *will* land in the folder, not only from copies already recorded, so parallel jobs can
+        never pick the same name and overwrite each other."""
         n = self.node(node_id)
-        name = f"{node_id}_{self._folder_name(n['label'])}" if src.is_dir() else src.name
-        folder = self.organized_folder(node_id)
-        taken = {(o.get("organized") or {}).get("path") for k, o in self.nodes.items() if k != node_id}
-        if f"{folder}/{name}" in taken:  # two objects with the same file name in one folder
-            name = f"{node_id}_{name}"
+        if src.is_dir():
+            return f"{node_id}_{self._folder_name(n['label'])}"
+        name, folder = src.name, self.organized_folder(node_id)
+        for k, o in self.nodes.items():
+            if k == node_id or not o.get("path"):
+                continue
+            rec = o.get("organized") or {}
+            if rec.get("path") == f"{folder}/{name}":
+                return f"{node_id}_{name}"
+            other = o["path"].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+            if other == name and self.organized_folder(k) == folder:
+                return f"{node_id}_{name}"
         return name
+
+    def _check_target_free(self, node_id: str, rel: str) -> None:
+        for k, o in self.nodes.items():
+            if k != node_id and (o.get("organized") or {}).get("path") == rel:
+                raise SciWeaveError(f"{rel} at the destination already holds {k}'s copy; "
+                                    f"{node_id} would overwrite it (rename one of the files or move it to another group)")
+
+    @staticmethod
+    def _code_files(root: Path, code: list[str]) -> list[Path]:
+        """The files of a selection inside a folder: each entry is a file or folder relative to it,
+        or a glob pattern (e.g. "*/susier/*/susier_pip.tsv"); caches are skipped."""
+        out = set()
+        for entry in code:
+            if any(ch in entry for ch in "*?["):
+                hits = [f for f in root.glob(entry) if f.is_file()]
+                if not hits:
+                    raise SciWeaveError(f"pattern matches no file: {root / entry}")
+            else:
+                p = root / entry
+                if not p.exists():
+                    raise SciWeaveError(f"entry not found: {p}")
+                hits = [p] if p.is_file() else list(p.rglob("*"))
+            for f in hits:
+                if f.is_file() and "__pycache__" not in f.parts and f.suffix != ".pyc":
+                    out.add(f)
+        return sorted(out)
+
+    @staticmethod
+    def _code_fingerprint(root: Path, files: list[Path]) -> dict:
+        h, total = hashlib.sha256(), 0
+        for f in files:
+            st = f.stat()
+            total += st.st_size
+            h.update(f"{f.relative_to(root).as_posix()}|{st.st_size}|{int(st.st_mtime)}\n".encode())
+        return {"hash": "code:" + h.hexdigest(), "size": total, "kind": "code", "exact": False}
+
+    def organize_source(self, node_id: str) -> tuple[Path, list[Path] | None]:
+        """What "save to destination" copies: (source, files). A pipeline whose meta lists its
+        `code` (paths relative to the folder of its entry file, e.g. ["Snakefile", "rules",
+        "scripts", "config"]) is saved as that code set only, never its data or results;
+        files is None for an ordinary file / folder."""
+        n = self.node(node_id)
+        src = self.resolve(n["path"])
+        meta = n.get("meta") or {}
+        if n["type"] == "pipeline" and meta.get("code"):
+            root = src.parent if src.is_file() else src
+            return root, self._code_files(root, meta["code"])
+        if meta.get("include") and src.is_dir():  # a big results folder: save only the files that were used
+            return src, self._code_files(src, meta["include"])
+        return src, None
 
     def organize_copy(self, node_id: str, progress=None) -> dict:
         """Copy (or re-copy) one object into the destination. Returns the record; the caller
@@ -336,12 +451,18 @@ class Project:
         n = self.node(node_id)
         if not n.get("path"):
             raise SciWeaveError(f"{node_id} has no file to copy (a conceptual object)")
-        src = self.resolve(n["path"])
-        if not src.exists():
-            raise SciWeaveError(f"source not reachable: {src}")
+        if not self.resolve(n["path"]).exists():
+            raise SciWeaveError(f"source not reachable: {self.resolve(n['path'])}")
+        src, code_files = self.organize_source(node_id)
         old = n.get("organized") or {}
-        name = old.get("name") or self._organized_name(node_id, src)
+        name = old.get("name")
+        if name and self.organized_state(node_id) == "copy_conflict":
+            name = None  # its recorded copy path is shared with another object: give it its own name
+        if name and src.is_dir() and name != self._organized_name(node_id, src):
+            name = None  # was saved as a single file (e.g. a pipeline's Snakefile) and is now a folder / code set
+        name = name or self._organized_name(node_id, src)
         rel = f"{self.organized_folder(node_id)}/{name}"
+        self._check_target_free(node_id, rel)
         target = dest / rel
         try:
             target.resolve().relative_to(src.resolve())
@@ -354,9 +475,15 @@ class Project:
             if old.get("sidecar") and (dest / old["sidecar"]).exists():
                 shutil.move(str(dest / old["sidecar"]), str(self._sidecar_of(target)))
         target.parent.mkdir(parents=True, exist_ok=True)
-        fp = fingerprint(src)
+        if code_files is not None:
+            files, fp = code_files, self._code_fingerprint(src, code_files)
+            if is_remote(src):  # status reads remote code-set fingerprints from the TTL memo: renew it with this one
+                sel = list(n["meta"].get("code") or n["meta"].get("include") or [])
+                _ttl_put("sel|" + os.path.normcase(str(src)) + "|" + "|".join(sel), fp)
+        else:
+            files = sorted(x for x in src.rglob("*") if x.is_file()) if src.is_dir() else [src]
+            fp = fingerprint(src)
         lines = []
-        files = sorted(x for x in src.rglob("*") if x.is_file()) if src.is_dir() else [src]
         total = 2 * sum(x.stat().st_size for x in files)  # every byte is read twice: copy + check
         done = [0]
 
@@ -367,19 +494,25 @@ class Project:
         if progress:
             progress(0, total, "copying")
         stale = target.with_name(target.name + ".sciweave-part")  # leftovers of an interrupted copy
-        if stale.is_dir():
-            shutil.rmtree(stale, ignore_errors=True)
-        elif stale.exists():
-            stale.unlink()
+        if stale.exists() and not (src.is_dir() and stale.is_dir()):
+            shutil.rmtree(stale, ignore_errors=True) if stale.is_dir() else stale.unlink()
         if src.is_dir():
-            # copy into a temporary folder, verify every file, then swap it in (files removed at the source go too)
-            tmp = target.with_name(target.name + ".sciweave-part")
-            if tmp.exists():
-                shutil.rmtree(tmp)
+            # copy into a temporary folder, verify every file, then swap it in (files removed at the source go too).
+            # A folder left by an interrupted copy is resumed: its finished files were each verified
+            # against the source when written, and are kept if the source still has the same size
+            # and mtime (copystat set it); half-written *.sciweave-part files are rewritten.
+            tmp = stale
             for f in files:
                 rel_f = f.relative_to(src).as_posix()
-                (tmp / rel_f).parent.mkdir(parents=True, exist_ok=True)
-                lines.append(f"{self._copy_verified(f, tmp / rel_f, tick)}  {target.name}/{rel_f}")
+                out = tmp / rel_f
+                out.parent.mkdir(parents=True, exist_ok=True)
+                st, prev = f.stat(), out.stat() if out.is_file() else None
+                if prev and prev.st_size == st.st_size and prev.st_mtime_ns == st.st_mtime_ns:
+                    tick(st.st_size, "copying")
+                    digest = self._hash_file(out, tick, "checking")
+                else:
+                    digest = self._copy_verified(f, out, tick)
+                lines.append(f"{digest}  {target.name}/{rel_f}")
             if target.exists():
                 old_dir = target.with_name(target.name + ".sciweave-old")
                 os.replace(target, old_dir)
@@ -392,10 +525,13 @@ class Project:
         manifest = "\n".join(lines) + "\n"
         side = self._sidecar_of(target)
         side.write_text(manifest, encoding="utf-8")  # sha256sum format: check with `sha256sum -c` from its folder
-        return {"path": rel, "name": name, "source": str(src), "source_hash": fp["hash"], "size": fp["size"],
-                "source_mtime": src.stat().st_mtime_ns if src.is_file() else None,
-                "kind": fp["kind"], "copied": now_iso(), "sidecar": f"{self.organized_folder(node_id)}/{side.name}",
-                "sha256": hashlib.sha256(manifest.encode()).hexdigest(), "files": len(lines), "verified": now_iso()}
+        rec = {"path": rel, "name": name, "source": str(src), "source_hash": fp["hash"], "size": fp["size"],
+               "source_mtime": src.stat().st_mtime_ns if src.is_file() else None,
+               "kind": fp["kind"], "copied": now_iso(), "sidecar": f"{self.organized_folder(node_id)}/{side.name}",
+               "sha256": hashlib.sha256(manifest.encode()).hexdigest(), "files": len(lines), "verified": now_iso()}
+        if code_files is not None:
+            rec["code"] = list(n["meta"].get("code") or n["meta"]["include"])
+        return rec
 
     @staticmethod
     def _sidecar_of(target: Path) -> Path:
@@ -411,18 +547,42 @@ class Project:
                     tick(len(chunk), phase)
         return h.hexdigest()
 
+    COPY_ATTEMPTS = 5
+    COPY_BACKOFF = 2.0  # seconds, doubled after each failed attempt
+
     @staticmethod
     def _copy_verified(src: Path, dst: Path, tick=None) -> str:
         """Copy one file while hashing the source, re-read the copy and compare; only a copy whose
-        SHA-256 equals the source's replaces the old one. Returns the SHA-256."""
+        SHA-256 equals the source's replaces the old one. Returns the SHA-256.
+
+        Network shares (SMB) fail a read now and then with a transient OSError (e.g. EINVAL,
+        "Invalid argument") on a file that reads fine a second later; the copy then reopens the
+        source and resumes at the last byte written instead of failing the whole job."""
+        import errno
+        import time
         tmp = dst.with_name(dst.name + ".sciweave-part")
         h = hashlib.sha256()
-        with open(src, "rb") as fi, open(tmp, "wb") as fo:
-            for chunk in iter(lambda: fi.read(8 * 1024 * 1024), b""):
-                h.update(chunk)
-                fo.write(chunk)
-                if tick:
-                    tick(len(chunk), "copying")
+        pos = 0
+        for attempt in range(Project.COPY_ATTEMPTS):
+            try:
+                with open(src, "rb") as fi, open(tmp, "r+b" if pos else "wb") as fo:
+                    fi.seek(pos)
+                    fo.seek(pos)
+                    fo.truncate()  # drop a chunk half-written before the failure
+                    for chunk in iter(lambda: fi.read(8 * 1024 * 1024), b""):
+                        fo.write(chunk)
+                        h.update(chunk)
+                        pos += len(chunk)
+                        if tick:
+                            tick(len(chunk), "copying")
+                break
+            except (FileNotFoundError, PermissionError):
+                raise
+            except OSError as exc:
+                if exc.errno == errno.ENOSPC or attempt == Project.COPY_ATTEMPTS - 1:
+                    raise SciWeaveError(f"copying {src} failed after {attempt + 1} attempt(s) "
+                                        f"at byte {pos:,}: {exc}") from exc
+                time.sleep(Project.COPY_BACKOFF * 2 ** attempt)
         shutil.copystat(src, tmp)
         digest = h.hexdigest()
         if Project._hash_file(tmp, tick, "checking") != digest:
@@ -449,7 +609,11 @@ class Project:
             return {"copied": False}
         dst = self.destination / rec["path"] if self.destination else None
         src = Path(rec["source"])
-        ss, sn = self._total_size(src)
+        if rec.get("code") and src.is_dir():
+            fs = self._code_files(src, rec["code"])
+            ss, sn = sum(f.stat().st_size for f in fs), len(fs)
+        else:
+            ss, sn = self._total_size(src)
         ds, dn = self._total_size(dst) if dst else (0, 0)
         state = self.organized_state(node_id)
         return {"copied": True, "state": state, "source_size": ss, "copy_size": ds, "source_files": sn, "copy_files": dn,
@@ -530,11 +694,13 @@ class Project:
                  detail=res.get("message", ""), actor=actor)
 
     def organize_record(self, node_id: str, rec: dict, actor: str = "user") -> None:
+        self._check_target_free(node_id, rec["path"])  # a parallel job may have taken it meanwhile
         n = self.node(node_id)
         again = bool(n.get("organized"))
         n["organized"] = rec
         n.pop("organize_skip", None)  # copied after all: no longer skipped
         self.log("organized_copy", node=node_id, detail=("updated " if again else "") + rec["path"], actor=actor)
+        self.save_fp_cache()  # organize_copy renewed fingerprints: keep them, or status compares against stale ones
 
     def organize(self, node_id: str, actor: str = "user") -> dict:
         rec = self.organize_copy(node_id)
@@ -581,6 +747,8 @@ class Project:
             return None
         if self.destination is None or not (self.destination / rec["path"]).exists():
             return "copy_missing"
+        if any(k != node_id and (o.get("organized") or {}).get("path") == rec["path"] for k, o in self.nodes.items()):
+            return "copy_conflict"  # another object's copy is recorded at the same path: only one can be there
         src = Path(rec["source"])
         if not src.exists():
             return "source_missing"
@@ -588,7 +756,18 @@ class Project:
             st = src.stat()
             if st.st_size == rec.get("size") and st.st_mtime_ns == rec["source_mtime"]:
                 return "ok"
-        return "ok" if fingerprint(src)["hash"] == rec["source_hash"] else "source_changed"
+        if rec.get("code"):  # a code set / file selection: only those files count
+            key = "sel|" + os.path.normcase(str(src)) + "|" + "|".join(rec["code"])
+            hit = _ttl_get(key, refresh=lambda: _ttl_put(key, self._code_fingerprint(src, self._code_files(src, rec["code"])))) \
+                if is_remote(src) else None
+            try:
+                now = (hit or self._code_fingerprint(src, self._code_files(src, rec["code"])))["hash"]
+            except SciWeaveError:
+                return "source_changed"
+            if not hit and is_remote(src):
+                _ttl_put(key, {"hash": now})
+            return "ok" if now == rec["source_hash"] else "source_changed"
+        return "ok" if fingerprint(src, fresh=False)["hash"] == rec["source_hash"] else "source_changed"
 
     # ---------------------------------------------------------- relocate ----
     def relocate(self, old: str, new: str, dry_run: bool = False, actor: str = "user") -> list[tuple[str, str, str]]:
@@ -771,12 +950,72 @@ class Project:
             self.log("node_updated", node=node_id, detail=", ".join(changed), actor=actor)
         return node
 
-    def remove_node(self, node_id: str, actor: str = "user") -> None:
+    def removal_plan(self, node_id: str) -> dict:
+        """What deleting an object takes with it, before anything is deleted:
+        - every link to or from it;
+        - every object that depends on it alone: made from it (a link points from it to the object)
+          and with no link to anything that stays (repeated down the chain);
+        - "orphaned": objects that stay but are left with no link at all (e.g. an input that fed
+          only a deleted pipeline) -- upstream data is never deleted automatically;
+        - the history entries that list any of them, and the saved copies at the destination.
+        Files on disk, stored versions and saved copies are never deleted."""
         self.node(node_id)
-        del self.nodes[node_id]
-        removed = [e["id"] for e in self.edges if node_id in (e["source"], e["target"])]
-        self.graph["edges"] = [e for e in self.edges if node_id not in (e["source"], e["target"])]
-        self.log("node_removed", node=node_id, actor=actor, detail=f"and {len(removed)} edge(s)")
+        gone = {node_id}
+
+        def links_of(k):
+            return [e for e in self.edges if k in (e["source"], e["target"])]
+        while True:
+            more = set()
+            for k in self.nodes:
+                if k in gone:
+                    continue
+                links = links_of(k)
+                if (links and all((e["target"] if e["source"] == k else e["source"]) in gone for e in links)
+                        and any(e["target"] == k and e["source"] in gone for e in links)):
+                    more.add(k)
+            if not more:
+                break
+            gone |= more
+        edges = [e for e in self.edges if e["source"] in gone or e["target"] in gone]
+        orphaned = sorted({k for e in edges for k in (e["source"], e["target"]) if k not in gone
+                           and all((x["target"] if x["source"] == k else x["source"]) in gone for x in links_of(k))},
+                          key=self._id_sort)
+        return {
+            "node": node_id,
+            "also": sorted(gone - {node_id}, key=self._id_sort),
+            "orphaned": orphaned,
+            "edges": [{"id": e["id"], "source": e["source"], "target": e["target"], "rel": e["rel"]} for e in edges],
+            "script_refs": [e["id"] for e in self.edges if e.get("script") in gone and e not in edges],
+            "analyses": {k: sorted(set(a.get("nodes") or []) & gone) for k, a in self.analyses.items()
+                         if set(a.get("nodes") or []) & gone},
+            "copies": {k: self.nodes[k]["organized"]["path"] for k in sorted(gone) if self.nodes[k].get("organized")},
+            "labels": {k: self.nodes[k]["label"] for k in gone | set(orphaned)},
+        }
+
+    def remove_nodes(self, plan: dict, actor: str = "user") -> None:
+        """Apply a removal_plan(): drop the objects, their links, script references and history links."""
+        gone = {plan["node"], *plan["also"]}
+        for nid in gone:
+            self.node(nid)
+        for e in self.edges:
+            if e.get("script") in gone:
+                e["script"], e["script_version"] = None, None
+        self.graph["edges"] = [e for e in self.edges if e["source"] not in gone and e["target"] not in gone]
+        for a in self.analyses.values():
+            if set(a.get("nodes") or []) & gone:
+                a["nodes"] = [x for x in a["nodes"] if x not in gone]
+        for x in self.project_notes:  # notes stay; they just stop pointing at deleted objects
+            x["nodes"] = [k for k in x.get("nodes", []) if k not in gone]
+        for nid in gone:
+            del self.nodes[nid]
+        self.log("node_removed", node=plan["node"], actor=actor,
+                 detail=f"with {len(plan['edges'])} link(s)" + (f" and {', '.join(plan['also'])}" if plan["also"] else "")
+                        + "; files, versions and saved copies kept")
+
+    def remove_node(self, node_id: str, actor: str = "user") -> None:
+        """Remove one object and its links only (no cascade)."""
+        self.remove_nodes({"node": node_id, "also": [], "edges": [e for e in self.edges if node_id in (e["source"], e["target"])]},
+                          actor=actor)
 
     def _is_inside(self, p: Path) -> bool:
         try:
@@ -877,6 +1116,49 @@ class Project:
             self.log("version_saved", node=node_id, detail=message or f"v{v['v']}", actor=actor,
                      version=v["v"], why=why or None, changes=len(v["changes"]) or None)
         return v
+
+    def confirm_current(self, node_id: str, why: str, parents: list[str] | None = None, actor: str = "user") -> dict:
+        """The node's latest version was checked against its inputs' current versions and is still valid (no re-run
+        needed): record those versions as the ones it stands on, so it stops being stale for them.
+
+        For when an input changed in a part this node does not use (a shared config gaining another target), or the
+        node was in fact rebuilt from the current input but the input's copy was saved later. The file is not touched
+        and no version is added; the latest version keeps a dated record (who, why, which inputs moved from which
+        version), shown in history. `parents` limits it to those inputs; a reason is required."""
+        if not why or not why.strip():
+            raise SciWeaveError("confirm needs a reason (--why): what was checked, and why no re-run is needed")
+        node = self.node(node_id)
+        if node["type"] in PROCESS_TYPES:
+            raise SciWeaveError(f"{node_id} is a {node['type']}: confirm the data it produced instead "
+                                f"({', '.join(self.process_outputs(node_id)) or 'none'})")
+        if not node["versions"]:
+            raise SciWeaveError(f"{node_id} has no versions yet (save it first)")
+        if node["path"]:
+            p = self.resolve(node["path"])
+            if p is not None and p.exists() and not unchanged_since(p, node["versions"][-1]):
+                raise SciWeaveError(f"{node_id} changed on disk since its last version: save it instead of confirming")
+        eff = self.effective_parents(node_id)
+        if parents:
+            unknown = [x for x in parents if x not in eff]
+            if unknown:
+                raise SciWeaveError(f"{node_id} is not built from {', '.join(unknown)}")
+        latest = node["versions"][-1]
+        rec = latest.setdefault("parents", {})
+        moved = {}
+        for pid in (parents or eff):
+            cur = self.nodes[pid]["current_version"]
+            if cur is not None and rec.get(pid) != cur:
+                moved[pid] = [rec.get(pid), cur]
+                rec[pid] = cur
+        targets = set(parents or eff)
+        for e in self.incoming(node_id):
+            if e["rel"] != "part_of" and e["source"] in targets and e["source"] in self.nodes:
+                e["source_version"] = self.nodes[e["source"]]["current_version"]
+        c = {"ts": now_iso(), "actor": actor, "why": why.strip(), "parents": moved}
+        latest.setdefault("confirmations", []).append(c)
+        self.log("confirmed", node=node_id, detail=why.strip(), actor=actor, version=latest["v"],
+                 parents=", ".join(f"{k} v{a}->v{b}" for k, (a, b) in moved.items()) or None)
+        return c
 
     def mark_final(self, node_id: str, version: int | None = None, actor: str = "user") -> int:
         node = self.node(node_id)
@@ -1453,6 +1735,53 @@ class Project:
         self.log("note_added", node=node_id, detail=text[:120], actor=actor)
         return note
 
+    # ---------------------------------------------------- project notes ----
+    # Project-wide notes and open issues, each about zero or more objects (e.g. "the LYNXgwas
+    # 5-cohort locus calls used a pre-dedup LD panel": IN44, R28, R29). Shown in the dashboard's
+    # Project actions panel, in each object's panel, and as a marker on objects with an open issue.
+    NOTE_KINDS = ("note", "issue")
+
+    @property
+    def project_notes(self) -> list:
+        return self.graph.setdefault("project_notes", [])
+
+    def project_note(self, note_id: str) -> dict:
+        for x in self.project_notes:
+            if x["id"] == note_id:
+                return x
+        raise SciWeaveError(f"no project note {note_id}")
+
+    def add_project_note(self, text: str, nodes=(), kind: str = "note", actor: str = "user") -> dict:
+        if kind not in self.NOTE_KINDS:
+            raise SciWeaveError(f"kind must be one of {', '.join(self.NOTE_KINDS)}")
+        for nid in nodes:
+            self.node(nid)
+        num = max([int(x["id"][2:]) for x in self.project_notes] + [0]) + 1
+        note = {"id": f"PN{num}", "ts": now_iso(), "updated": now_iso(), "kind": kind, "status": "open",
+                "text": text.strip(), "nodes": list(dict.fromkeys(nodes)), "actor": actor, "log": []}
+        self.project_notes.append(note)
+        self.log("project_note_added", detail=f"{note['id']} ({kind}): {text[:100]}", actor=actor, nodes=list(nodes))
+        return note
+
+    def update_project_note(self, note_id: str, status: str | None = None, text: str | None = None,
+                            nodes=None, comment: str | None = None, actor: str = "user") -> dict:
+        note = self.project_note(note_id)
+        if status:
+            if status not in ("open", "resolved"):
+                raise SciWeaveError("status must be open or resolved")
+            note["status"] = status
+        if text:
+            note["text"] = text.strip()
+        if nodes is not None:
+            for nid in nodes:
+                self.node(nid)
+            note["nodes"] = list(dict.fromkeys(nodes))
+        if comment or status:
+            note["log"].append({"ts": now_iso(), "actor": actor, "text": comment or f"marked {status}"})
+        note["updated"] = now_iso()
+        self.log("project_note_updated", detail=f"{note_id}: {comment or status or 'edited'}", actor=actor)
+        return note
+
     def set_group(self, name: str, nodes=(), color: str | None = None, label: str | None = None,
                   actor: str = "user") -> dict:
         g = self.graph["groups"].setdefault(name, {"label": name, "color": None})
@@ -1466,6 +1795,75 @@ class Project:
                 n["groups"].append(name)
         self.log("group_set", detail=f"{name}: {', '.join(nodes)}", actor=actor, nodes=list(nodes))
         return g
+
+    # ------------------------------------------------------- sub-groups ----
+    # A node's first group is its sub-group inside its step: objects of one kind that belong
+    # together (the 5 cohort genotypes, the per-cohort Manhattan plots). The dashboard draws it
+    # as an inner halo in the step's oval and the destination uses it as a sub-folder.
+    PROCESS_TYPES = ("pipeline", "script", "step")
+
+    @staticmethod
+    def _file_kind(n: dict) -> str:
+        path = n.get("path") or ""
+        name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    @staticmethod
+    def _common_label(labels: list[str]) -> str:
+        pre = os.path.commonprefix(labels)
+        if len(labels) > 1 and pre not in labels:  # cut back to a whole word
+            pre = pre[: max(pre.rfind(" "), pre.rfind("("), 0)] if not pre.endswith((" ", "(")) else pre
+        return pre.strip(" (-,·:")
+
+    def suggest_groups(self) -> list[dict]:
+        """Sub-groups to propose for objects that have none yet, per step:
+        1. "history": the analysis history already groups them (the same `group` label on the
+           analyses that list them);
+        2. "set": two or more objects of the same type and file kind, tied the same way to one
+           process (all feed PL1, or PL1 produces all of them).
+        Returns [{name, step, nodes, source, reason}], largest first."""
+        free = {k for k, n in self.nodes.items() if not n.get("groups") and n["type"] not in ("note", "article")}
+        out, taken = [], set()
+        by_label: dict[tuple, list[str]] = {}
+        for a in self.analyses.values():
+            if not a.get("group"):
+                continue
+            for nid in a.get("nodes") or []:
+                if nid in free and nid in self.nodes:
+                    by_label.setdefault((a["group"], self.nodes[nid].get("step")), []).append(nid)
+        for (label, step), ids in sorted(by_label.items(), key=lambda kv: -len(kv[1])):
+            ids = sorted(set(ids) - taken, key=self._id_sort)
+            if len(ids) >= 2:
+                out.append({"name": label, "step": step, "nodes": ids, "source": "history",
+                            "reason": "grouped under this label in the analysis history"})
+                taken.update(ids)
+        sets: dict[tuple, set] = {}
+        for e in self.edges:
+            if e["rel"] not in ("feeds", "produces", "derives"):
+                continue
+            for mine, other, way in ((e["source"], e["target"], "feed"), (e["target"], e["source"], "made by")):
+                o = self.nodes.get(other)
+                n = self.nodes.get(mine)
+                if not o or not n or mine not in free or mine in taken or o["type"] not in self.PROCESS_TYPES:
+                    continue
+                sets.setdefault((n.get("step"), n["type"], self._file_kind(n), way, other), set()).add(mine)
+        for (step, typ, _kind, way, other), ids in sorted(sets.items(), key=lambda kv: -len(kv[1])):
+            ids = sorted(ids - taken, key=self._id_sort)
+            if len(ids) < 2:
+                continue
+            name = self._common_label([self.nodes[i]["label"] for i in ids])
+            if len(name) < 4:
+                name = f"{typ}s {'feeding' if way == 'feed' else 'made by'} {other}"
+            out.append({"name": name, "step": step, "nodes": ids, "source": "set",
+                        "reason": f"same type ({typ}) and file kind, all {'feed' if way == 'feed' else 'made by'} "
+                                  f"{other} · {self.nodes[other]['label']}"})
+            taken.update(ids)
+        return out
+
+    @staticmethod
+    def _id_sort(nid: str):
+        m = re.match(r"([A-Za-z]+)(\d+)(.*)", nid)
+        return (m.group(1), int(m.group(2)), m.group(3)) if m else (nid, 0, "")
 
     # ------------------------------------------------------------ status ----
     def upstream(self, node_id: str) -> list[str]:
@@ -1686,6 +2084,7 @@ class Project:
             "groups": self.graph["groups"],
             "steps": self.steps,
             "analyses": self.analyses,
+            "project_notes": self.project_notes,
             "hidden": self.hidden_nodes(),
             "destination": str(self.destination) if self.destination else None,
             "organized": {nid: {**n["organized"], "state": self.organized_state(nid),

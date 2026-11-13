@@ -152,6 +152,19 @@ def cmd_save(args):
         print(f"now stale downstream: {', '.join(down)}")
 
 
+def cmd_confirm(args):
+    p = get_project(args)
+    for nid in args.ids:
+        c = p.confirm_current(nid, args.why or "", parents=args.parents or None, actor=args.actor)
+        moved = ", ".join(f"{k} v{a}->v{b}" for k, (a, b) in c["parents"].items())
+        print(f"{nid}: confirmed" + (f" ({moved})" if moved else " (inputs already current)"))
+    p.commit()
+    st = p.status(check_disk=False)
+    still = [nid for nid in args.ids if st[nid]["stale"]]
+    if still:
+        print("still stale (other inputs): " + "; ".join(f"{n}: {', '.join(st[n]['reasons'])}" for n in still))
+
+
 def cmd_final(args):
     p = get_project(args)
     v = p.mark_final(args.id, args.version, actor=args.actor)
@@ -175,6 +188,23 @@ def cmd_note(args):
 
 def cmd_group(args):
     p = get_project(args)
+    if args.suggest:
+        sugg = p.suggest_groups()
+        if not sugg:
+            print("no sub-groups to suggest: every set of related objects is already grouped")
+            return
+        for s in sugg:
+            print(f"  {s['name']}  [step {s['step'] or '-'}]  {' '.join(s['nodes'])}\n      {s['source']}: {s['reason']}")
+        if args.apply:
+            for s in sugg:
+                p.set_group(s["name"], s["nodes"], actor=args.actor)
+            p.commit()
+            print(f"applied {len(sugg)} sub-group(s)")
+        else:
+            print("rename where needed: sciweave group \"<name>\" <IDs>   ·   or apply all as shown: sciweave group --suggest --apply")
+        return
+    if not args.name:
+        raise SciWeaveError("group needs a name (or --suggest)")
     p.set_group(args.name, args.ids, color=args.color, label=args.label, actor=args.actor)
     p.commit()
     print(f"group '{args.name}': {', '.join(args.ids) or '(metadata only)'}")
@@ -182,17 +212,84 @@ def cmd_group(args):
 
 def cmd_edit(args):
     p = get_project(args)
+    meta = {}
+    if args.code or args.include:
+        # what "save to destination" copies: a pipeline's code set, or the used files of a big results folder
+        node = p.node(args.id)
+        src = p.resolve(node["path"])
+        root = src.parent if src.is_file() else src
+        for key, entries in (("code", args.code), ("include", args.include)):
+            if entries:
+                p._code_files(root, entries)  # every entry must exist (raises otherwise)
+                meta[key] = entries
     n = p.update_node(args.id, label=args.label, description=args.desc, tags=args.tag, groups=args.group,
-                      step=args.step, actor=args.actor)
+                      step=args.step, meta=meta or None, actor=args.actor)
     p.commit()
     print(f"updated {n['id']} · {n['label']}")
 
 
+def cmd_pnote(args):
+    p = get_project(args)
+    a = args.args
+    if args.action == "ls":
+        notes = [x for x in p.project_notes if args.all or x["status"] == "open"]
+        if not notes:
+            print("no open project notes" + ("" if args.all else " (--all includes resolved)"))
+        for x in notes:
+            mark = "!" if x["kind"] == "issue" and x["status"] == "open" else ("x" if x["status"] == "resolved" else "-")
+            about = f"\n        about: {', '.join(x['nodes'])}" if x["nodes"] else ""
+            print(f"{mark} {x['id']:5} [{x['kind']}, {x['status']}] {x['text']}{about}")
+        return
+    if args.action == "add":
+        if not a:
+            raise SciWeaveError('usage: sciweave pnote add "text" [--about ID ...] [--issue]')
+        x = p.add_project_note(a[0], nodes=args.about or [], kind="issue" if args.issue else "note", actor=args.actor)
+    elif args.action in ("resolve", "reopen"):
+        if not a:
+            raise SciWeaveError(f"usage: sciweave pnote {args.action} PN<n> [\"why\"]")
+        x = p.update_project_note(a[0], status="resolved" if args.action == "resolve" else "open",
+                                  comment=a[1] if len(a) > 1 else None, actor=args.actor)
+    else:  # comment
+        if len(a) < 2:
+            raise SciWeaveError('usage: sciweave pnote comment PN<n> "text"')
+        x = p.update_project_note(a[0], comment=a[1], actor=args.actor)
+    p.commit()
+    print(f"{x['id']} [{x['kind']}, {x['status']}] {x['text']}")
+
+
+def removal_text(plan: dict) -> str:
+    lab = plan["labels"]
+    lines = [f"delete {plan['node']} · {lab[plan['node']]}"]
+    if plan["also"]:
+        lines.append("  also deleted (made from it and linked to nothing else):")
+        lines += [f"    {k} · {lab[k]}" for k in plan["also"]]
+    lines.append(f"  links removed: {len(plan['edges'])}"
+                 + "".join(f"\n    {e['source']} -{e['rel']}-> {e['target']}" for e in plan["edges"]))
+    if plan["orphaned"]:
+        lines.append("  KEPT but left without links (delete separately if not needed): "
+                     + ", ".join(f"{k} · {lab[k]}" for k in plan["orphaned"]))
+    if plan["script_refs"]:
+        lines.append(f"  script reference cleared on {len(plan['script_refs'])} other link(s)")
+    if plan["analyses"]:
+        lines.append("  unlinked from history: " + ", ".join(f"{k} ({', '.join(v)})" for k, v in plan["analyses"].items()))
+    if plan["copies"]:
+        lines.append("  saved copies at the destination are KEPT: " + ", ".join(plan["copies"].values()))
+    lines.append("  files on disk and stored versions are kept")
+    return "\n".join(lines)
+
+
 def cmd_rm(args):
     p = get_project(args)
-    p.remove_node(args.id, actor=args.actor)
+    plan = p.removal_plan(args.id)
+    print(removal_text(plan))
+    if args.dry_run:
+        return
+    if plan["also"] and not args.yes:
+        raise SciWeaveError(f"{len(plan['also'])} other object(s) would be deleted with {args.id}; "
+                            "re-run with --yes to confirm (or --dry-run to only look)")
+    p.remove_nodes(plan, actor=args.actor)
     p.commit()
-    print(f"removed {args.id} (files on disk and stored versions are kept)")
+    print("deleted")
 
 
 def cmd_trace(args):
@@ -248,6 +345,108 @@ def cmd_article(args):
             flag = " STALE" if c["edge_stale"] or c["state"] == "stale" else ""
             print(f"  {str(c['as']):22} {c['id']:6} {c['label'][:40]:40} placed v{c['placed_version'] or '-'} "
                   f"current v{c['current_version'] or '-'} final v{c['final_version'] or '-'}{flag}")
+
+
+def cmd_tex(args):
+    """LaTeX manuscripts: attach a folder, and propose / review / compile changes from the terminal."""
+    from sciweave import manuscript as ms_mod
+    p = get_project(args)
+    a = args.args
+
+    def need(n, usage):
+        if len(a) < n:
+            raise SciWeaveError(f"usage: sciweave tex {args.action} {usage}")
+
+    if args.action == "attach":
+        need(2, 'FOLDER "Title" [--main main.tex] [--step article]')
+        art = ms_mod.attach(p, a[0], a[1], main=args.main, step=args.step, node_id=args.id, actor=args.actor)
+        p.commit()
+        secs = [e["source"] for e in p.incoming(art["id"]) if e["rel"] == "part_of"]
+        print(f"attached {art['id']} · {art['label']}  ({art['meta']['folder']})")
+        print(f"  sections: {', '.join(secs) or '(none yet: add latex/sections/*.tex and attach again)'}")
+        print(f"  edit it in the dashboard: sciweave serve, then Articles > {art['id']} > LaTeX editor")
+        return
+    need(1, "ARTICLE ...")
+    ms = ms_mod.Manuscript(p, a[0])
+    if args.action == "files":
+        for f in ms.files():
+            extra = f"  [{f['pending']} to review]" if f["pending"] else ""
+            print(f"  {f['path']:40} {f['node'] or '':6}{extra}")
+    elif args.action == "propose":
+        need(2, "ARTICLE FILE (--from NEW_FILE | --edits edits.json | --replace FIND REPLACE ...) -m \"why\"")
+        if args.from_file:
+            pr = ms.propose(a[1], Path(args.from_file).read_text(encoding="utf-8"), message=args.message or "", actor=args.actor)
+        elif args.edits or args.replace:
+            edits = json.loads(Path(args.edits).read_text(encoding="utf-8")) if args.edits else []
+            edits += [{"find": f, "replace": r} for f, r in (args.replace or [])]
+            pr = ms.propose_edits(a[1], edits, message=args.message or "", actor=args.actor)
+        else:
+            raise SciWeaveError("propose needs --from, --edits or --replace")
+        print(f"proposed {pr['id']} for {pr['file']}: {len(pr['hunks'])} change(s); waiting for review in the LaTeX editor")
+    elif args.action == "proposals":
+        prs = ms.proposals(status=None if args.all else "open")
+        if not prs:
+            print("nothing to review" + ("" if args.all else " (--all includes decided ones)"))
+        for pr in prs:
+            n_open = sum(h["state"] == "open" for h in pr["hunks"])
+            print(f"  {pr['id']:5} {pr['status']:9} {pr['file']:32} {n_open}/{len(pr['hunks'])} open  {pr['actor']}  {pr['message'][:60]}")
+    elif args.action == "diff":
+        need(2, "ARTICLE PROPOSAL")
+        pr = ms.proposal(a[1])
+        print(f"{pr['id']} · {pr['file']} · {pr['status']} · {pr['message']}")
+        for h in pr["hunks"]:
+            txt = "".join(t if op == "=" else f"[-{t}-]" if op == "-" else f"{{+{t}+}}" for op, t in h["words"])
+            print(f"\n-- change {h['n']} (line {h['start'] + 1}, {h['state']}) --\n{txt.rstrip()}")
+    elif args.action in ("accept", "reject"):
+        need(2, "ARTICLE PROPOSAL [--hunks 1,3]")
+        sel = [int(x) for x in args.hunks.split(",")] if args.hunks else "all"
+        r = ms.resolve(a[1], accept=sel if args.action == "accept" else (),
+                       reject=sel if args.action == "reject" else (), actor=args.actor)
+        pr = r["proposal"]
+        print(f"{pr['id']}: " + ", ".join(f"{h['n']} {h['state']}" for h in pr["hunks"]) + f"  -> {pr['status']}")
+        if r["conflicts"]:
+            print(f"  conflict (text changed since the proposal): {r['conflicts']}")
+    elif args.action == "withdraw":
+        need(2, "ARTICLE PROPOSAL")
+        print(f"{ms.withdraw(a[1], actor=args.actor)['id']} withdrawn")
+    elif args.action == "compile":
+        r = ms.compile(actor=args.actor, submission=args.submission)
+        print(f"{'ok' if r['ok'] else 'FAILED'} in {r['seconds']} s ({r['engine']}) -> {ms.pdf_path(r['job'])}")
+        for e in r["errors"]:
+            print(f"  {e['file'] or '?'}:{e['line'] or '?'}: {e['message']}")
+        if r["warnings"]:
+            print(f"  {len(r['warnings'])} warning(s), e.g. {r['warnings'][0]}")
+        for x in r.get("evidence_problems", []):
+            print(f"  evidence: {x}")
+    elif args.action == "evidence":
+        from sciweave.evidence import Evidence
+        ev = Evidence(ms)
+        sub = a[1] if len(a) > 1 else "build"
+        if sub == "init":
+            made = ev.init()["created"]
+            print(f"created in {ms.folder}: {', '.join(made) or 'nothing (all present)'}")
+            return
+        if sub not in ("build", "status"):
+            raise SciWeaveError("usage: sciweave tex evidence ARTICLE [init|build|status]")
+        r = ev.build() if sub == "build" else ev.report()
+        if not r.get("enabled"):
+            print(f"no assets.tsv / evidence.tsv in {ms.folder}: run  sciweave tex evidence {ms.id} init")
+            return
+        if r.get("sync"):
+            s_ = r["sync"]
+            print(f"assets: {len(s_['copied'])} copied, {s_['unchanged']} unchanged"
+                  + (f", {len(s_['missing'])} missing" if s_["missing"] else ""))
+            for x in s_["missing"] + s_["problems"]:
+                print(f"  ! {x}")
+        for x in r.get("picked_up") or []:
+            print(f"  pdf: {x['file']}: {x['status']}")
+        for eid, e in r.get("evidence", {}).items():
+            mark = "highlighted" if e.get("highlighted") else ("linked" if e.get("path") else "MISSING")
+            print(f"  {eid:5} {mark:11} {e['target']:10} p.{e.get('page') or '-':4} used {len(e.get('used', []))}x  {e['claim'][:60]}")
+        for x in r.get("problems", []):
+            print(f"  ! {x}")
+        if r.get("unused"):
+            print(f"  not yet cited in the text: {', '.join(r['unused'])}")
 
 
 def cmd_plan(args):
@@ -872,6 +1071,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-refresh", action="store_true",
                    help="cosmetic change: do not mark the node as rebuilt from current inputs")
 
+    s = cmd("confirm", cmd_confirm, "checked: still valid for its inputs' current versions (no re-run; reason required)")
+    s.add_argument("ids", nargs="+")
+    s.add_argument("--why", required=True, help="what was checked and why no re-run is needed (kept with the version)")
+    s.add_argument("--parents", nargs="+", help="confirm only for these inputs (default: all of them)")
+
     s = cmd("final", cmd_final, "mark a version as final")
     s.add_argument("id")
     s.add_argument("--version", type=int)
@@ -886,9 +1090,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("text", nargs="+")
 
-    s = cmd("group", cmd_group, "put nodes in a named group (halos in the dashboard)")
-    s.add_argument("name")
+    s = cmd("group", cmd_group, "put nodes in a named sub-group of their step (inner halos in the dashboard); "
+                                "--suggest proposes them")
+    s.add_argument("name", nargs="?")
     s.add_argument("ids", nargs="*")
+    s.add_argument("--suggest", action="store_true", help="propose sub-groups for objects not in one yet")
+    s.add_argument("--apply", action="store_true", help="with --suggest: apply every suggestion as shown")
     s.add_argument("--color")
     s.add_argument("--label")
 
@@ -899,9 +1106,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tag", action="append")
     s.add_argument("--group", action="append")
     s.add_argument("--step")
+    s.add_argument("--code", nargs="+", help="pipeline: files/folders (relative to its entry file's folder) "
+                                             "that make up its code; 'organize' saves only these")
+    s.add_argument("--include", nargs="+", help="results folder: files/folders/globs to save, not the whole folder")
 
-    s = cmd("rm", cmd_rm, "remove a node (and its links) from the graph")
+    s = cmd("pnote", cmd_pnote, "project notes and open issues: ls / add / comment / resolve / reopen")
+    s.add_argument("action", nargs="?", default="ls", choices=["ls", "add", "comment", "resolve", "reopen"])
+    s.add_argument("args", nargs="*")
+    s.add_argument("--about", nargs="+", help="object IDs the note is about")
+    s.add_argument("--issue", action="store_true", help="an open issue (marked on the network) rather than a note")
+    s.add_argument("--all", action="store_true", help="ls: include resolved notes")
+
+    s = cmd("rm", cmd_rm, "delete an object, its links, and objects linked only to it (shows what first)")
     s.add_argument("id")
+    s.add_argument("--dry-run", action="store_true", help="only show what would be deleted")
+    s.add_argument("--yes", action="store_true", help="confirm when other objects would be deleted too")
 
     s = cmd("trace", cmd_trace, "how was it made (or --down: what depends on it)")
     s.add_argument("id")
@@ -927,6 +1146,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--version", type=int)
     s.add_argument("--id")
     s.add_argument("--sections", help="comma list (default: abstract,introduction,methods,results,discussion)")
+
+    s = cmd("tex", cmd_tex, "LaTeX manuscripts: attach / files / propose / proposals / diff / accept / reject / compile / evidence")
+    s.add_argument("action", choices=["attach", "files", "propose", "proposals", "diff", "accept", "reject",
+                                      "withdraw", "compile", "evidence"])
+    s.add_argument("args", nargs="*", help='attach: FOLDER "Title" · others: ARTICLE [FILE|PROPOSAL]')
+    s.add_argument("--from", dest="from_file", help="propose: the whole new text of the file")
+    s.add_argument("--edits", help='propose: JSON list of {"find", "replace", "nth"?}')
+    s.add_argument("--replace", nargs=2, action="append", metavar=("FIND", "REPLACE"), help="propose: one exact edit (repeatable)")
+    s.add_argument("-m", "--message", help="propose: why (shown to the reviewer)")
+    s.add_argument("--hunks", help="accept/reject: comma list of change numbers (default: all open)")
+    s.add_argument("--submission", action="store_true", help="compile: the journal copy (main_submission.pdf, no evidence markers)")
+    s.add_argument("--all", action="store_true", help="proposals: include decided ones")
+    s.add_argument("--main", default="main.tex", help="attach: the main .tex file (default main.tex)")
+    s.add_argument("--step", help="attach: analysis step for the article nodes")
+    s.add_argument("--id", help="attach: article node id")
 
     s = cmd("plan", cmd_plan, "import protocol: template / check / apply a plan.json")
     s.add_argument("action", choices=["template", "check", "apply"])

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · LaTeX · SciWeave</title>
+<link rel="icon" type="image/png" href="__LOGO__">
+<script>
+  try { var t = localStorage.getItem('sciweave-theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch (e) {}
+</script>
+<style>
+__CSS__
+</style>
+</head>
+<body class="tex-body">
+<header>
+  <div class="brand">
+    __HOMELINK__<a class="home-link" href="./?page=articles" title="Back to the project's articles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Network</a>
+    <img src="__LOGO__" alt="" width="26" height="26" style="border-radius:7px">
+    SciWeave <span class="proj">LaTeX</span>
+  </div>
+  <select class="ctl" id="article-select" title="Article"></select>
+  <span class="tex-file" id="cur-file"></span>
+  <span class="dirty-dot" id="dirty-dot" title="Unsaved changes" hidden></span>
+  <div class="spacer"></div>
+  <span class="tex-status" id="status"></span>
+  <span class="panes-menu-wrap"><button class="btn" id="btn-panes" title="Hidden panels" hidden>Panels</button><div class="panes-menu" id="panes-menu" hidden></div></span>
+  <button class="btn" id="btn-history" title="Earlier versions of this file">History</button>
+  <button class="btn" id="btn-save" title="Save (Ctrl+S)">Save</button>
+  <button class="btn primary" id="btn-compile" title="Save and compile (Ctrl+Enter)">Compile</button>
+  <button class="btn" id="btn-submission" title="Build the journal copy: evidence markers and links removed">Submission PDF</button>
+  <button class="icon-btn" id="btn-pdf" title="Show / hide the PDF">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6"/></svg>
+  </button>
+  <button class="icon-btn" id="theme-toggle" title="Light / dark">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+  </button>
+</header>
+
+<main class="tex-main" id="tex-main">
+  <aside class="tex-side">
+    <div class="side-h">Files</div>
+    <div id="files" class="file-list"></div>
+    <div class="side-h pane-h" id="props-h">Changes to review <span class="tab-badge" id="prop-count"></span><span class="pane-ctl"><button class="pane-btn fold" data-fold="props" title="Fold / unfold"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button><button class="pane-btn" data-bin="props" title="Hide this panel (bring it back from Panels in the top bar)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></button></span></div>
+    <div id="props" class="prop-list"></div>
+    <div class="side-h ev-head pane-h" id="ev-h" hidden>Evidence
+      <span class="ev-tabs"><button class="ev-tab on" data-evtab="linked">Linked <b id="ev-count"></b></button><button class="ev-tab" data-evtab="missing">Missing <b id="ev-miss"></b></button></span><span class="pane-ctl"><button class="pane-btn fold" data-fold="ev" title="Fold / unfold"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button><button class="pane-btn" data-bin="ev" title="Hide this panel (bring it back from Panels in the top bar)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></button></span>
+    </div>
+    <div id="evidence" class="ev-list" hidden></div>
+    <div class="side-foot" id="side-foot"></div>
+  </aside>
+
+  <section class="tex-center">
+    <div id="doc-tabs" class="doc-tabs"></div>
+    <div id="note-view" class="note-view" hidden>
+      <div class="note-bar">
+        <span class="note-path" id="note-path"></span>
+        <span class="dirty-dot" id="note-dirty" title="Unsaved changes" hidden></span>
+        <span class="spacer"></span>
+        <span class="note-modes"><button class="ev-tab" data-nmode="view">Preview</button><button class="ev-tab" data-nmode="split">Split</button><button class="ev-tab" data-nmode="edit">Edit</button></span>
+      </div>
+      <div class="note-body" id="note-body">
+        <textarea id="note-ed" class="note-ed" spellcheck="true"></textarea>
+        <div id="note-md" class="md"></div>
+      </div>
+    </div>
+    <div id="rev-view" class="rev-view" hidden></div>
+    <div id="banner" class="tex-banner" hidden></div>
+    <div id="editor-wrap" class="editor-wrap">
+      <pre id="hl" class="ed-layer ed-hl" aria-hidden="true"></pre>
+      <textarea id="ed" class="ed-layer ed-text" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+    </div>
+    <div id="review" class="review" hidden></div>
+  </section>
+
+  <section class="tex-right" id="pdf-pane">
+    <div class="pdf-bar">
+      <span id="compile-info" class="compile-info">Not compiled yet</span>
+      <button class="btn small stale-pdf" id="stale-pdf" hidden title="The text or the evidence changed after this PDF was built; links may point to old targets">PDF out of date · Compile</button>
+      <span class="spacer"></span>
+      <button class="btn small" id="btn-pdfwin" title="Open the PDF in its own window (e.g. on a second screen); it offers to reload after each compile">Open in new window</button>
+      <button class="btn small" id="btn-log">Log</button>
+      <span class="pane-ctl"><button class="pane-btn" data-fold="pdf" title="Fold the PDF to the right"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button><button class="pane-btn" data-bin="pdf" title="Hide the PDF (bring it back from Panels or the PDF button)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg></button></span>
+    </div>
+    <button class="pdf-strip" id="pdf-strip" data-fold="pdf" title="Unfold the PDF"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg><span>PDF</span></button>
+    <div id="doc-bar" class="doc-bar" hidden></div>
+    <div id="errors" class="errors" hidden></div>
+    <pre id="log" class="log" hidden></pre>
+    <iframe id="pdf" class="pdf-frame" title="PDF preview"></iframe>
+    <div id="pdf-empty" class="pdf-empty">Compile to see the PDF here.</div>
+  </section>
+</main>
+<div id="toast" class="toast" hidden></div>
+<script>window.SW_ARTICLE = __ARTICLE__;</script>
+<script>
+__JS__
+</script>
+</body>
+</html>

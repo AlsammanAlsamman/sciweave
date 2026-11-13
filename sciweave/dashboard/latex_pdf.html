@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · PDF · SciWeave</title>
+<link rel="icon" type="image/png" href="__LOGO__">
+<script>
+  try { var t = localStorage.getItem('sciweave-theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch (e) {}
+</script>
+<style>
+__CSS__
+html, body { height: 100%; margin: 0; }
+body.pdfwin { display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
+.pw-bar { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border);
+  background: var(--surface); font-size: 12.5px; }
+.pw-bar .spacer { flex: 1; }
+.pw-title { font-weight: 600; }
+.pw-info { color: var(--text-3); }
+.pw-new { display: none; align-items: center; gap: 8px; padding: 2px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
+.pw-new.on { display: inline-flex; }
+.pw-auto { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); cursor: pointer; }
+#pdf { flex: 1; width: 100%; border: 0; background: #525659; }
+.pw-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
+.pw-empty[hidden], #pdf[hidden] { display: none; }  /* a display rule would otherwise beat the hidden attribute */
+</style>
+</head>
+<body class="pdfwin">
+<div class="pw-bar">
+  <span class="pw-title">__TITLE__</span>
+  <span class="pw-info" id="info">loading…</span>
+  <span class="pw-new" id="new">New version compiled <button class="btn small primary" id="reload">Reload</button></span>
+  <span class="spacer"></span>
+  <label class="pw-auto" title="Reload by itself after every compile (jumps back to page 1)"><input type="checkbox" id="auto"> auto-reload</label>
+  <button class="btn small" id="sub" title="Show the submission PDF (no evidence markers)">Submission PDF</button>
+</div>
+<iframe id="pdf" title="Manuscript PDF"></iframe>
+<div class="pw-empty" id="empty" hidden>Not compiled yet. Compile in the editor.</div>
+<script>window.SW_ARTICLE = __ARTICLE__;</script>
+<script>
+(function () {
+  'use strict';
+  var A = window.SW_ARTICLE, shown = null, latest = null, sub = false;
+  var $ = function (id) { return document.getElementById(id); };
+  function q(o) { var a = []; for (var k in o) a.push(encodeURIComponent(k) + '=' + encodeURIComponent(o[k])); return a.join('&'); }
+  function when(ns) { var d = new Date(ns / 1e6); return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  try { $('auto').checked = localStorage.getItem('sw-pdfwin-auto') === '1'; } catch (e) {}
+  function show(stamp) {
+    shown = stamp; $('new').classList.remove('on');
+    if (!stamp) { $('pdf').hidden = true; $('empty').hidden = false; return; }
+    $('empty').hidden = true; $('pdf').hidden = false;
+    $('pdf').src = (sub ? 'api/tex/submission-pdf?' : 'api/tex/pdf?') + q({ article: A, t: stamp }) + '#view=FitH';
+    $('info').textContent = (sub ? 'submission PDF' : 'working PDF') + ' · compiled ' + when(stamp);
+  }
+  function poll() {
+    fetch('api/tex/stamp?' + q({ article: A }), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (st) {
+      latest = st.pdf;
+      if (shown === null) { show(latest); return; }
+      if (!sub && latest && latest !== shown) {
+        if ($('auto').checked) show(latest); else $('new').classList.add('on');
+      }
+    }).catch(function () { $('info').textContent = 'server not reachable'; });
+  }
+  $('reload').addEventListener('click', function () { show(latest); });
+  $('auto').addEventListener('change', function () { try { localStorage.setItem('sw-pdfwin-auto', this.checked ? '1' : '0'); } catch (e) {} });
+  $('sub').addEventListener('click', function () {
+    sub = !sub; this.textContent = sub ? 'Working PDF' : 'Submission PDF'; show(sub ? Date.now() * 1e6 : latest);
+  });
+  poll(); setInterval(poll, 3000);
+})();
+</script>
+</body>
+</html>

@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -87,6 +88,15 @@ def list_jobs(p: Project, max_age_done: float = 3600) -> list[dict]:
             continue
         if j["state"] in RUNNING and now - j.get("heartbeat", 0) > HEARTBEAT_STALE:
             j["state"] = "interrupted"  # the process went away (killed, machine slept / shut down)
+        if j["state"] in ("interrupted", "error") and j.get("kind") == "copy":
+            # superseded: the object was copied successfully after this job started -> forget it
+            rec = (p.nodes.get(j["node"]) or {}).get("organized") or {}
+            if rec.get("copied") and rec["copied"] > j.get("created", ""):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+                continue
         if j["state"] not in RUNNING and j["state"] != "interrupted" and now - j.get("heartbeat", now) > max_age_done:
             continue
         out.append(j)
@@ -106,7 +116,10 @@ def start(p: Project, node_id: str, kind: str = "copy") -> dict:
     _write(f, job)
     log = open(jobs_dir(p) / f"{jid}.log", "w", encoding="utf-8")
     cmd = [sys.executable, "-m", "sciweave", "-C", str(p.root), "job", jid]
-    kw = {"stdout": log, "stderr": subprocess.STDOUT, "stdin": subprocess.DEVNULL, "close_fds": True}
+    # run from the project root, not the caller's folder: a folder named "sciweave" in the caller's
+    # working directory (e.g. the repo checkout next to other projects) would shadow the package
+    kw = {"stdout": log, "stderr": subprocess.STDOUT, "stdin": subprocess.DEVNULL, "close_fds": True,
+          "cwd": str(p.root)}
     if os.name == "nt":  # detached, no console window, not killed with the dashboard
         kw["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED | NEW_GROUP | NO_WINDOW
     else:
@@ -165,5 +178,6 @@ def run(root: Path, jid: str) -> int:
             beat(state="done", phase="done", ok=res["ok"], message=res["message"])
         return 0
     except Exception as exc:  # noqa: BLE001 - reported to the dashboard through the job file
+        traceback.print_exc()  # stdout/stderr go to .sciweave/jobs/<id>.log
         beat(state="error", phase="error", error=f"{type(exc).__name__}: {exc}")
         return 1

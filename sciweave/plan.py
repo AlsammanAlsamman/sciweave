@@ -340,6 +340,21 @@ def check(p: Project, plan: dict) -> Report:
         if tgt not in param_targets:
             r.warn(f"{where}: green edge (no params) into an output — confirm nothing result-changing was set")
 
+    # sub-groups: new objects of one kind tied the same way to one process belong together
+    planned = {n.get("key"): n for n in plan.get("nodes", []) if n.get("key")}
+    sets: dict[tuple, set] = {}
+    for e in plan.get("edges", []):
+        if e.get("rel") not in ("feeds", "produces", "derives"):
+            continue
+        for mine, other, way in ((e.get("from"), e.get("to"), "feed"), (e.get("to"), e.get("from"), "are made by")):
+            n = planned.get(mine)
+            if n and not n.get("groups") and type_of(other) in ("pipeline", "script", "step"):
+                sets.setdefault((n.get("step"), n.get("type"), Project._file_kind(n), way, other), set()).add(mine)
+    for (step, typ, _kind, way, other), members in sets.items():
+        if len(members) >= 2:
+            r.warn(f"nodes {', '.join(sorted(members))}: {len(members)} {typ}s that all {way} {other} have no group; "
+                   f"give them one sub-group (\"groups\": [\"<what binds them>\"]) so they show as a set in step {step}")
+
     # cycles over existing + planned edges
     color: dict[str, int] = {}
 

@@ -117,6 +117,9 @@ def reveal(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path if path.is_dir() else path.parent)])
 
 
+# files the browser cannot show: /tex-asset/ opens them in the SciWeave viewer unless ?raw=1
+VIEW_EXT = {".xlsx", ".tsv", ".csv"}
+
 class Handler(BaseHTTPRequestHandler):
     project_root: Path | None = Path(".")  # None = home mode (every registered project)
     lock = threading.Lock()
@@ -253,6 +256,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(article_summary(self._project(), q["id"]))
             if path == "/api/file":
                 return self._file(q)
+            if path == "/latex-pdf.html":
+                from sciweave.export import render_latex_pdf
+                html = render_latex_pdf(self._project(), q.get("article", ""))
+                return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+            if path in ("/latex", "/latex.html"):
+                from sciweave.export import render_latex
+                html = render_latex(self._project(), q.get("article", ""), home_link=self._home_link)
+                return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+            if path.startswith("/api/tex/"):
+                return self._tex_get(path, q)
+            if path.startswith("/tex-asset/"):
+                return self._tex_asset(path, q)
+            if path.startswith("/tex-view/"):
+                return self._tex_view(path)
             return self._json({"error": "not found"}, 404)
         except SciWeaveError as exc:
             return self._json({"error": str(exc)}, 400)
@@ -272,6 +289,164 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(n["path"])[0] or "application/octet-stream"
         return self._send(200, path.read_bytes(), ctype)
 
+    # ------------------------------------------------------- LaTeX editor ----
+    def _ms(self, q: dict):
+        from sciweave.manuscript import Manuscript
+        return Manuscript(self._project(), q["article"])
+
+    def _tex_asset(self, path: str, q: dict | None = None):
+        """/tex-asset/<article>/<file>: a file of the article folder (figures, tables, cited PDFs,
+        MetaData) -- what the evidence links in the working PDF open. Spreadsheets and tables open in
+        the viewer (a browser cannot show them and would only offer to save); `?raw=1` gets the file."""
+        from urllib.parse import unquote, quote
+        parts = path.split("/", 3)
+        if len(parts) < 4 or not parts[3]:
+            return self._json({"error": "not found"}, 404)
+        ms = self._ms({"article": parts[2]})
+        f = (ms.folder / unquote(parts[3])).resolve()
+        if ms.folder not in f.parents or not f.is_file() or any(x.startswith(".") for x in f.relative_to(ms.folder).parts):
+            return self._json({"error": "not found"}, 404)
+        if f.suffix.lower() in VIEW_EXT and not (q or {}).get("raw"):
+            from sciweave import viewer
+            from sciweave.evidence import read_tsv, ASSETS
+            rel = f.relative_to(ms.folder).as_posix()
+            assets = {a["key"]: a for a in read_tsv(ms.folder / ASSETS) if a.get("key")}
+            key = next((k for k, a in assets.items() if a.get("file") == rel), None)
+            legend = ""
+            if key and key + ".legend" in assets and (ms.folder / assets[key + ".legend"]["file"]).is_file():
+                legend = (ms.folder / assets[key + ".legend"]["file"]).read_text(encoding="utf-8", errors="replace")
+            raw = f"{self._prefix()}/tex-asset/{parts[2]}/{quote(rel)}?raw=1"
+            html = viewer.render(f, rel, where=(q or {}).get("where", ""), title=assets[key]["label"] if key else rel,
+                                 legend=legend, file_url=raw)
+            return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or f.suffix.lower() in (".tsv", ".csv", ".tex", ".md", ".json", ".txt"):
+            ctype = "text/plain; charset=utf-8"  # shown, never run as a page
+        return self._send(200, f.read_bytes(), ctype)
+
+    def _prefix(self) -> str:
+        """'' for a single-project server, '/p/<id>' under the home server."""
+        full = urlparse(self.path).path
+        route = self._route(full) or ""
+        return full[: len(full) - len(route)] if route and full.endswith(route) else ""
+
+    def _link_base(self, article: str) -> str | None:
+        """The server root as the browser sees it, for the working PDF's links (None if unusable in an href)."""
+        base = f"http://{self.headers.get('Host', '')}{self._prefix()}/"
+        return base if re.match(r"^http://[A-Za-z0-9.\-:\[\]]+[A-Za-z0-9_./\-]*/$", base) else None
+
+    def _tex_view(self, path: str):
+        """/tex-view/<article>/ev/<E7> or /asset/<F6>: the evidence opened in a viewer for its file type
+        (tables with the supporting rows highlighted, figures with their legend); PDFs go to the
+        browser's viewer at the page."""
+        from urllib.parse import quote
+        from sciweave.evidence import Evidence, read_tsv, ASSETS
+        from sciweave import viewer
+        parts = path.split("/")
+        if len(parts) != 5 or parts[3] not in ("ev", "asset"):
+            return self._json({"error": "not found"}, 404)
+        ms = self._ms({"article": parts[2]})
+        ev = Evidence(ms)
+        assets = {a["key"]: a for a in read_tsv(ms.folder / ASSETS) if a.get("key")}
+        title, claim, quote_, where, page, legend = parts[4], "", "", "", "1", ""
+        if parts[3] == "ev":
+            e = (ev.report().get("evidence") or {}).get(parts[4])
+            if not e or not e.get("path"):
+                return self._json({"error": f"{parts[4]}: no file for this evidence (see the Evidence panel)"}, 404)
+            rel, claim, quote_, where, page = e["path"], e.get("claim", ""), e.get("quote", ""), e.get("where", ""), e.get("page") or "1"
+            title = f"{parts[4]} · {assets[e['target']]['label'] if e['target'] in assets else e['target']}"
+            key = e["target"] if e["target"] in assets else None
+        else:
+            a = assets.get(parts[4])
+            if not a:
+                return self._json({"error": f"{parts[4]} is not in assets.tsv"}, 404)
+            rel, title, key = a["file"], a.get("label") or parts[4], parts[4]
+        f = (ms.folder / rel).resolve()
+        if ms.folder not in f.parents or not f.is_file():
+            return self._json({"error": f"{rel} missing"}, 404)
+        file_url = f"{self._prefix()}/tex-asset/{parts[2]}/" + quote(rel)
+        raw_url = file_url + "?raw=1"
+        if f.suffix.lower() == ".pdf":
+            self.send_response(302)
+            self.send_header("Location", f"{file_url}#page={page}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if key and key + ".legend" in assets:
+            lf = ms.folder / assets[key + ".legend"]["file"]
+            legend = lf.read_text(encoding="utf-8", errors="replace") if lf.is_file() else ""
+        html = viewer.render(f, rel, where=where, title=title, claim=claim, quote=quote_, legend=legend,
+                             file_url=file_url if f.suffix.lower() not in VIEW_EXT else raw_url)
+        return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _tex_get(self, path: str, q: dict):
+        if path == "/api/tex/articles":
+            p = self._project()
+            return self._json([{"id": n["id"], "label": n["label"], "folder": n["meta"].get("folder")}
+                               for n in p.nodes.values() if n["type"] == "article"])
+        ms = self._ms(q)
+        if path == "/api/tex/summary":
+            return self._json(ms.summary())
+        if path == "/api/tex/file":
+            return self._json(ms.read(q["path"]))
+        if path == "/api/tex/stamp":
+            return self._json(ms.stamp())
+        if path == "/api/tex/note":
+            return self._json(ms.note_read(q["key"]))
+        if path == "/api/tex/revisions":
+            return self._json(ms.revisions())
+        if path == "/api/tex/proposals":
+            status = q.get("status", "open")
+            return self._json(ms.proposals(status=None if status == "all" else status, file=q.get("file") or None))
+        if path == "/api/tex/snapshots":
+            return self._json(ms.snapshots(q["path"]))
+        if path == "/api/tex/snapshot":
+            return self._json({"text": ms.snapshot_text(q["path"], q["id"])})
+        if path == "/api/tex/pdf":
+            pdf = ms.shown_pdf()
+            if not pdf.exists():
+                return self._json({"error": "not compiled yet"}, 404)
+            return self._send(200, pdf.read_bytes(), "application/pdf")
+        if path == "/api/tex/log":
+            return self._json(ms.last_compile() or {})
+        if path == "/api/tex/evidence":
+            from sciweave.evidence import Evidence
+            return self._json(Evidence(ms).report())
+        if path == "/api/tex/submission-pdf":
+            pdf = ms.pdf_path("main_submission")
+            if not pdf.exists():
+                return self._json({"error": "no submission PDF yet"}, 404)
+            return self._send(200, pdf.read_bytes(), "application/pdf")
+        return self._json({"error": "not found"}, 404)
+
+    def _tex_post(self, path: str, body: dict):
+        ms = self._ms(body)
+        if path == "/api/tex/save":
+            return self._json(ms.save(body["path"], body["text"], base_hash=body.get("base_hash"), actor="user"))
+        if path == "/api/tex/note-save":
+            return self._json(ms.note_save(body["key"], body["text"], base_hash=body.get("base_hash"), actor="user"))
+        if path == "/api/tex/compile":
+            if body.get("save"):
+                ms.save(body["save"]["path"], body["save"]["text"], base_hash=body["save"].get("base_hash"))
+            return self._json(ms.compile(actor="user", submission=bool(body.get("submission")),
+                                         link_base=self._link_base(ms.id)))
+        if path == "/api/tex/evidence":
+            from sciweave.evidence import Evidence
+            return self._json(Evidence(ms).build())
+        if path == "/api/tex/resolve":
+            return self._json(ms.resolve(body["id"], accept=body.get("accept", []), reject=body.get("reject", []),
+                                         actor="user"))
+        if path == "/api/tex/propose":
+            actor = body.get("actor", "claude")
+            if body.get("edits"):
+                pr = ms.propose_edits(body["path"], body["edits"], message=body.get("message", ""), actor=actor)
+            else:
+                pr = ms.propose(body["path"], body["text"], message=body.get("message", ""), actor=actor)
+            return self._json({"ok": True, "proposal": pr})
+        if path == "/api/tex/withdraw":
+            return self._json({"ok": True, "proposal": ms.withdraw(body["id"], actor=body.get("actor", "user"))})
+        return self._json({"error": "not found"}, 404)
+
     def do_POST(self):  # noqa: N802
         url = urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
@@ -280,6 +455,10 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._json({"error": "invalid JSON"}, 400)
         try:
+            if "/api/tex/" in url.path:  # the LaTeX editor: own per-manuscript locks, never the graph lock
+                path = self._route(url.path)
+                if path and path.startswith("/api/tex/"):
+                    return self._tex_post(path, body)
             with self.lock:
                 path = self._route(url.path)
                 if path is None:
@@ -372,6 +551,26 @@ class Handler(BaseHTTPRequestHandler):
                     job = jobs.start(p, n["id"], kind="copy")
                     return self._json({"ok": True, "job": job["id"],
                                        "message": f"copying {n['id']} to {p.destination}/{p.organized_folder(n['id'])}/"})
+                if path == "/api/pnote":
+                    if body.get("id"):
+                        x = p.update_project_note(body["id"], status=body.get("status"), text=body.get("text"),
+                                                  comment=body.get("comment"), actor="user")
+                    else:
+                        x = p.add_project_note(body["text"], nodes=body.get("nodes", []),
+                                               kind=body.get("kind", "note"), actor="user")
+                    p.commit()
+                    return self._json({"ok": True, "note": x, "message": f"{x['id']} saved"})
+                if path == "/api/remove-preview":
+                    return self._json({"ok": True, **p.removal_plan(body["node"])})
+                if path == "/api/remove":
+                    plan = p.removal_plan(body["node"])  # recomputed here: what the user saw may be stale
+                    if sorted(plan["also"]) != sorted(body.get("expect_also", plan["also"])):
+                        raise SciWeaveError("the network changed since the preview; open Delete again to see the new list")
+                    p.remove_nodes(plan, actor="user")
+                    p.commit()
+                    n = 1 + len(plan["also"])
+                    return self._json({"ok": True, "removed": [plan["node"], *plan["also"]],
+                                       "message": f"deleted {n} object(s) and {len(plan['edges'])} link(s); files and saved copies kept"})
                 if path == "/api/hide":
                     p.hide_nodes([body["node"]], hidden=bool(body["hidden"]), actor="user")
                     p.commit()

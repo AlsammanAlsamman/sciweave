@@ -73,6 +73,29 @@ def render_home() -> str:
     })
 
 
+def render_latex(p: Project, article_id: str = "", home_link: bool = False) -> str:
+    """The LaTeX editor (live only: it reads and writes the manuscript through api/tex/)."""
+    return _fill(_read("dashboard/latex.html"), {
+        "__TITLE__": p.graph["project"]["name"].replace("<", "&lt;"),
+        "__LOGO__": _logo_uri(),
+        "__HOMELINK__": HOME_LINK if home_link else "",
+        "__CSS__": _read("dashboard/style.css") + "\n" + _read("dashboard/latex.css"),
+        "__ARTICLE__": _script_safe(json.dumps(article_id)),
+        "__JS__": _script_safe(_read("dashboard/latex.js")),
+    })
+
+
+def render_latex_pdf(p: Project, article_id: str = "") -> str:
+    """The manuscript PDF alone, for a second window or screen: polls the editor's stamp and offers to
+    reload when a new PDF is compiled (auto-reload optional, since reloading jumps back to page 1)."""
+    return _fill(_read("dashboard/latex_pdf.html"), {
+        "__TITLE__": p.graph["project"]["name"].replace("<", "&lt;"),
+        "__LOGO__": _logo_uri(),
+        "__CSS__": _read("dashboard/style.css"),
+        "__ARTICLE__": _script_safe(json.dumps(article_id)),
+    })
+
+
 def export_html(p: Project, out: str | Path | None = None) -> Path:
     path = Path(out) if out else p.root / "sciweave.html"
     path.write_text(render_dashboard(p, live=False), encoding="utf-8")

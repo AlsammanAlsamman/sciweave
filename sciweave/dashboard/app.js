@@ -20,6 +20,7 @@
     page: 'network',
     view: load('view', 'force'),
     groupBy: load('groupBy', null),
+    subBy: load('subBy', 'group'),
     showRefs: load('showRefs', true),
     showCode: load('showCode', true),
     showParams: load('showParams', false),
@@ -134,6 +135,16 @@
     return s ? s.order + '. ' + s.label : 'no step yet';
   }
   function groupLabel(key) { return state.groupBy === 'step' ? stepLabel(key) : key; }
+  // sub-group inside a step oval: the object's own set (its first group) or its node type
+  function subKey(n) {
+    if (state.subBy === 'type') return n.type;
+    if (state.subBy === 'group') return (n.groups || [])[0] || null;
+    return null;
+  }
+  function subLabel(key, count) {
+    var lab = state.subBy === 'type' ? ((DATA.types[key] || {}).label || key) : ((DATA.groups[key] || {}).label || key);
+    return lab + ' · ' + count;
+  }
   function sortGroups(keys) {
     if (state.groupBy === 'step') return keys.sort(function (a, b) { return stepOrder(a) - stepOrder(b) || d3.ascending(a, b); });
     var FLOW = ['sources', 'resources', 'process', 'outputs', 'writing', 'notes', 'updated today', 'this week', 'this month', 'older'];
@@ -167,11 +178,55 @@
     tooltipEl.style.left = x + 'px'; tooltipEl.style.top = y + 'px';
   }
   function hideTip() { tooltipEl.style.display = 'none'; }
+  // a pipeline is "pushed" when its meta names the GitHub repo + commit of its clean code,
+  // and "saved" when its code set has an up-to-date copy at the destination
+  function pipeStatus(n) {
+    if (n.type !== 'pipeline') return null;
+    var m = n.meta || {}, o = (DATA.organized || {})[n.id];
+    return { repo: m.repo || null, commit: m.commit ? String(m.commit).slice(0, 7) : null,
+      visibility: m.visibility || '', pushed: !!(m.repo && m.commit), saved: o ? o.state : null };
+  }
+  function pipeLine(p) {
+    return (p.pushed ? 'GitHub' + (p.visibility ? ' (' + p.visibility + ')' : '') + ' @ ' + p.commit : 'not pushed to GitHub') +
+      ' · ' + (p.saved === 'ok' ? 'code saved' : p.saved ? 'code copy: ' + p.saved.replace(/_/g, ' ') : 'code not saved');
+  }
+  // project notes / open issues about an object (open ones only unless all; issues first)
+  var NOTE_ICON = '<svg class="note-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5z" fill="var(--note)" stroke="var(--note-ink)" stroke-width="1.4" stroke-linejoin="round"/><path d="M15 3v4h4" fill="none" stroke="var(--note-ink)" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 11h8M8 14.5h8M8 18h5" stroke="var(--note-ink)" stroke-width="1.4" stroke-linecap="round"/></svg>';
+  function notesFor(id, all) {
+    return (DATA.project_notes || []).filter(function (x) { return (all || x.status === 'open') && (x.nodes || []).indexOf(id) >= 0; })
+      .sort(function (a, b) { return (a.kind === 'issue' ? 0 : 1) - (b.kind === 'issue' ? 0 : 1); });
+  }
+  function pnoteHtml(x, withAbout) {
+    var open = x.status === 'open', issue = x.kind === 'issue';
+    return '<div class="pnote' + (open ? '' : ' resolved') + '"><div class="pnote-head"><span class="chip ' + (issue && open ? 'state-missing' : '') + '">' +
+      (issue ? (open ? 'open issue' : 'issue') : 'note') + '</span> <b>' + esc(x.id) + '</b>' +
+      (open ? '' : ' <span class="chip org-ok">resolved</span>') + ' <span class="muted">' + esc(when(x.ts)) + '</span>' +
+      (LIVE ? '<span class="pnote-acts"><a class="nid" data-pncomment="' + esc(x.id) + '">comment</a> \u00b7 <a class="nid" data-pnstatus="' + esc(x.id) +
+        '" data-to="' + (open ? 'resolved' : 'open') + '">' + (open ? 'resolve' : 'reopen') + '</a></span>' : '') + '</div>' +
+      '<div class="pnote-text">' + esc(x.text) + '</div>' +
+      (withAbout && (x.nodes || []).length ? '<div class="muted pnote-about">about ' + x.nodes.map(nidLink).join(' ') + '</div>' : '') +
+      ((x.log || []).length ? '<div class="pnote-log">' + x.log.map(function (l) { return '<div><span class="muted">' + esc(when(l.ts)) + '</span> ' + esc(l.text) + '</div>'; }).join('') + '</div>' : '') +
+      '</div>';
+  }
+  function addProjectNote(nodes) {
+    var text = prompt('Project note' + (nodes.length ? ' about ' + nodes.join(', ') : '') + ':', '');
+    if (!text) return;
+    if (!nodes.length) {
+      var ids = prompt('About which objects? IDs separated by spaces (leave empty for the whole project):', '');
+      if (ids === null) return;
+      nodes = ids.split(/[\s,]+/).filter(Boolean);
+    }
+    var issue = confirm('Mark it as an OPEN ISSUE (red ! on the network until resolved)?\nCancel = a plain note.');
+    act(post('api/pnote', { text: text, nodes: nodes, kind: issue ? 'issue' : 'note' }));
+  }
+
   function nodeTip(n) {
-    var s = st(n.id);
+    var s = st(n.id), p = pipeStatus(n);
     return '<div class="t">' + esc(n.id) + ' · ' + esc(n.label) + '</div>' +
       '<div class="s">' + esc(n.type) + ' · ' + esc(n.mode) + (n.current_version ? ' · v' + n.current_version : '') +
       (n.final_version ? ' · final v' + n.final_version : '') + '</div>' +
+      (p ? '<div class="s">' + esc(pipeLine(p)) + '</div>' : '') +
+      notesFor(n.id).map(function (x) { return '<div class="s">' + (x.kind === 'issue' ? '\u26a0 ' : '\u2139 ') + esc(x.id) + ': ' + esc(trunc(x.text, 110)) + '</div>'; }).join('') +
       (s.state !== 'ok' ? '<div class="s">' + esc(s.state) + ': ' + esc((s.reasons || [])[0] || '') + '</div>' : '') +
       (n.description ? '<div class="s">' + esc(trunc(n.description, 160)) + '</div>' : '');
   }
@@ -241,6 +296,23 @@
       if (ageDays(d.updated) < 1) el.append('circle').attr('class', 'recent-dot').attr('r', 4.5).attr('cx', -r * 0.74).attr('cy', -r * 0.74);
       if (d.final_version) el.append('text').attr('class', 'star').attr('x', r * 0.55).attr('y', -r * 0.55)
         .attr('font-size', 13).attr('fill', cssVar('--final')).text('★');
+      var pn = notesFor(d.id);
+      if (pn.length) {  // open issue: red "!"; note only: blue "i"
+        var iss = pn[0].kind === 'issue';
+        var ng = el.append('g').attr('class', 'pnote-badge').attr('transform', 'translate(' + (-r * 1.05) + ',' + (-r * 0.15) + ')');
+        ng.append('circle').attr('r', 7).attr('fill', cssVar(iss ? '--edge-params' : '--cat-sources')).attr('stroke', cssVar('--surface')).attr('stroke-width', 1.5);
+        ng.append('text').attr('text-anchor', 'middle').attr('dy', '0.35em').attr('font-size', 10).attr('font-weight', 700)
+          .attr('fill', '#fff').text(iss ? '!' : 'i');
+      }
+      var ps = pipeStatus(d);
+      if (ps) {  // pushed + saved badge: green when both, amber when one is missing
+        var both = ps.pushed && ps.saved === 'ok';
+        var pg = el.append('g').attr('class', 'pipe-badge').attr('transform', 'translate(' + (r * 0.8) + ',' + (r * 0.8) + ')');
+        pg.append('circle').attr('r', 7.5).attr('fill', cssVar('--surface'))
+          .attr('stroke', cssVar(both ? '--edge-plain' : '--final')).attr('stroke-width', 1.6);
+        pg.append('text').attr('text-anchor', 'middle').attr('dy', '0.35em').attr('font-size', 10)
+          .attr('fill', cssVar(both ? '--edge-plain' : '--final')).text(ps.pushed ? '↑' : '!');
+      }
     });
     g.on('mouseenter', function (evt, d) { showTip(evt, nodeTip(d)); })
       .on('mousemove', function (evt, d) { showTip(evt, nodeTip(d)); })
@@ -314,7 +386,7 @@
   function jobLine(j, compact) {
     if (!j) return '';
     if (j.state === 'interrupted')
-      return '<div class="jl jl-bad">⚠ ' + (j.kind === 'verify' ? 'verification' : 'copy') + ' interrupted (the process stopped) — press Save to retry; leftovers are cleared first</div>';
+      return '<div class="jl jl-bad">⚠ ' + (j.kind === 'verify' ? 'verification' : 'copy') + ' interrupted (the process stopped) — press Save to retry; files already copied and checked are kept</div>';
     if (j.state === 'error') return '<div class="jl jl-bad">⚠ ' + esc(j.error || 'failed') + '</div>';
     if (!RUN[j.state]) return '';
     if (j.state === 'queued') return '<div class="jl"><div class="pbar"><span style="width:0"></span></div><span class="muted">queued — waiting for a free slot (2 copies at a time)</span></div>';
@@ -385,6 +457,7 @@
       '<div class="muted" style="font-size:12.5px;margin-top:2px">Click a node for its own panel; close it to come back here.</div>' +
       '<div class="actions"><button class="btn" data-sg="round" title="Look for new or changed result files not yet in the network">Check for new results</button>' +
       '<button class="btn" data-gohist="1">Analysis history</button></div>' +
+      projectNotesSection() +
       '<h3 class="pa-h">Organized copy \u00b7 destination</h3>';
     if (!dest) {
       html += '<p class="muted" style="margin:8px 0">Choose the folder where the organized copy of this project should live. ' +
@@ -411,7 +484,8 @@
       html += '<div class="sec"><h3>' + esc(title) + '</h3>' + items.map(function (n) {
         var o = org[n.id], st = n.type === 'resource' ? 'online' : !n.path ? 'nofile' : (o ? o.state : (n.organize_skip ? 'skipped' : 'none'));
         var chip = { skipped: ['large \u00b7 skipped', 'state-missing'], online: ['online \u00b7 nothing to copy', ''], nofile: ['no file \u2014 needs a path', 'state-missing'], none: ['not copied', ''], ok: ['copied', 'org-ok'], source_changed: ['source changed', 'state-stale'],
-          copy_missing: ['copy missing', 'state-missing'], source_missing: ['source unreachable', 'state-missing'] }[st] || [st, ''];
+          copy_missing: ['copy missing', 'state-missing'], source_missing: ['source unreachable', 'state-missing'],
+          copy_conflict: ['conflict: shares its copy path', 'state-stale'] }[st] || [st, ''];
         var btns = '';
         if (n.path) btns += '<button class="btn mini' + (st === 'ok' ? '' : ' primary') + '" data-dsave="' + esc(n.id) + '">' + (st === 'none' || st === 'skipped' ? 'Save' : st === 'ok' ? 'Copy again' : 'Update') + '</button>';
         if (o && st !== 'copy_missing') btns += '<button class="btn mini" data-dshow="' + esc(n.id) + '">Show</button>';
@@ -513,7 +587,8 @@
       });
     }
   }
-  var ORG_STATE = { ok: 'up to date', source_changed: 'source changed since copied', copy_missing: 'copy missing at destination', source_missing: 'source not reachable' };
+  var ORG_STATE = { ok: 'up to date', source_changed: 'source changed since copied', copy_missing: 'copy missing at destination', source_missing: 'source not reachable',
+    copy_conflict: 'another object is recorded at the same copy path: press Update on each to re-copy it under its own name' };
   function joinDest(rel) {  // show the destination path in the platform's own style
     var d = DATA.destination || '', win = d.indexOf('\\') >= 0;
     return d + (win ? '\\' : '/') + (win ? String(rel).replace(/\//g, '\\') : rel);
@@ -606,8 +681,16 @@
     var stepMode = state.groupBy === 'step';
     var gColor = {};
     groups.forEach(function (gname) { gColor[gname] = haloColor(gname); });
+    // sub-groups (inner halos) only in the step view, and only for sets of 2+ objects in one step
+    var subN = {};
+    nodes.forEach(function (d) {
+      var s = stepMode ? subKey(d.n) : null;
+      d.sub = s ? d.group + '|' + s : null; d.subName = s;
+      if (d.sub) subN[d.sub] = (subN[d.sub] || 0) + 1;
+    });
+    nodes.forEach(function (d) { if (d.sub && subN[d.sub] < 2) d.sub = null; });
 
-    var hullLayer = ctx.g.append('g'), labelLayer = ctx.g.append('g'), linkLayer = ctx.g.append('g'),
+    var hullLayer = ctx.g.append('g'), subLayer = ctx.g.append('g'), labelLayer = ctx.g.append('g'), linkLayer = ctx.g.append('g'),
       badgeLayer = ctx.g.append('g'), nodeLayer = ctx.g.append('g');
 
     // every group gets an anchor on a ring; nodes start at (and are pulled to) their anchor,
@@ -652,15 +735,50 @@
     // live growth: groups that were already drawn keep their place (a growing oval must not slide the
     // others around); only a brand-new group gets a new spot. A reload, resize or new grouping re-lays out.
     var ac = state.anchorCache;
-    if (ac && ac.mode === state.groupBy && !state.relayout)
-      Object.keys(anchor).forEach(function (g) { if (ac.a[g]) anchor[g] = ac.a[g]; });
+    if (ac && ac.mode === state.groupBy && !state.relayout) {
+      var fresh = {};
+      Object.keys(anchor).forEach(function (g) { fresh[g] = anchor[g]; if (ac.a[g]) anchor[g] = ac.a[g]; });
+      // keeping old places is only allowed while no two step discs overlap: a new step placed by the
+      // fresh packing, or a step that grew, can land on an old one. Then lay everything out again.
+      if (stepMode) {
+        var ks = Object.keys(anchor), clash = false;
+        for (var i = 0; i < ks.length && !clash; i++)
+          for (var j = i + 1; j < ks.length && !clash; j++) {
+            var a1 = anchor[ks[i]], a2 = anchor[ks[j]];
+            if (Math.hypot(a1[0] - a2[0], a1[1] - a2[1]) < stepR[ks[i]] + stepR[ks[j]] + GAP * 0.5) clash = true;
+          }
+        if (clash) { anchor = fresh; state.relayout = true; }
+      }
+    }
     state.anchorCache = { mode: state.groupBy, a: anchor };
+    // each sub-group gets its own spot inside its step's disc (largest first, on a ring around the
+    // centre; ungrouped objects stay in the middle), so sets sit side by side instead of interleaving
+    var subAnchor = {};
+    if (stepMode) {
+      var subsOf = {}, loose = {};
+      nodes.forEach(function (d) {
+        if (d.sub) (subsOf[d.group] = subsOf[d.group] || {})[d.sub] = subN[d.sub];
+        else loose[d.group] = (loose[d.group] || 0) + 1;
+      });
+      Object.keys(subsOf).forEach(function (g) {
+        var ks = Object.keys(subsOf[g]).sort(function (a, b) { return subsOf[g][b] - subsOf[g][a] || d3.ascending(a, b); });
+        var a0 = anchor[g], ring = (ks.length === 1 && !loose[g]) ? 0 : stepR[g] * (loose[g] ? 0.52 : 0.42);
+        ks.forEach(function (k, i) {
+          var ang = -Math.PI / 2 + i / ks.length * 2 * Math.PI;
+          subAnchor[k] = [a0[0] + Math.cos(ang) * ring, a0[1] + Math.sin(ang) * ring];
+        });
+      });
+    }
+    function targetOf(d) { return (d.sub && subAnchor[d.sub]) || anchor[d.group]; }
     if (state.relayout) state.posCache = {};
     state.relayout = false;
     var seen = {};
     nodes.forEach(function (d, i) {
       var an = anchor[d.group];
-      if (stepMode) {  // sunflower seeding inside the step's disc
+      if (stepMode && d.sub) {  // a set starts packed around its own spot
+        var js = seen[d.sub] = (seen[d.sub] || 0) + 1, sa = subAnchor[d.sub], sr = 14 * Math.sqrt(js);
+        d.x = sa[0] + Math.cos(js * 2.39996) * sr; d.y = sa[1] + Math.sin(js * 2.39996) * sr;
+      } else if (stepMode) {  // sunflower seeding inside the step's disc
         var j = seen[d.group] = (seen[d.group] || 0) + 1, rr = Math.sqrt(j / (1 + (nodes.length))) * stepR[d.group] * 0.9;
         d.x = an[0] + Math.cos(j * 2.39996) * Math.min(rr * 3, stepR[d.group] * 0.8);
         d.y = an[1] + Math.sin(j * 2.39996) * Math.min(rr * 3, stepR[d.group] * 0.8);
@@ -676,12 +794,13 @@
       });
     }
 
-    function clusterForce(strength) {
+    function clusterForce(strength, keyOf) {
       var ns;
+      keyOf = keyOf || function (d) { return d.group; };
       function force(alpha) {
         var c = {};
-        ns.forEach(function (d) { var k = c[d.group] || (c[d.group] = { x: 0, y: 0, n: 0 }); k.x += d.x; k.y += d.y; k.n++; });
-        ns.forEach(function (d) { var k = c[d.group]; d.vx -= (d.x - k.x / k.n) * strength * alpha; d.vy -= (d.y - k.y / k.n) * strength * alpha; });
+        ns.forEach(function (d) { var key = keyOf(d); if (key == null) return; var k = c[key] || (c[key] = { x: 0, y: 0, n: 0 }); k.x += d.x; k.y += d.y; k.n++; });
+        ns.forEach(function (d) { var key = keyOf(d); if (key == null) return; var k = c[key]; d.vx -= (d.x - k.x / k.n) * strength * alpha; d.vy -= (d.y - k.y / k.n) * strength * alpha; });
       }
       force.initialize = function (_) { ns = _; };
       return force;
@@ -696,12 +815,17 @@
     });
     var sim = d3.forceSimulation(nodes)
       .force('link', d3.forceLink(links).id(function (d) { return d.id; }).distance(function (l) { return l.e.rel === 'code' ? 60 : 95; })
-        .strength(function (l) { return l.source.group === l.target.group ? 0.4 : 0.04; }))
+        .strength(function (l) {
+          if (l.source.group !== l.target.group) return 0.04;
+          // inside a step, links between different sets are weak so the sets keep their own spots
+          return (l.source.sub || l.target.sub) && l.source.sub !== l.target.sub ? 0.06 : 0.4;
+        }))
       .force('charge', d3.forceManyBody().strength(-300).distanceMax(420))
       .force('collide', d3.forceCollide().radius(function (d) { return radius(d.n) + 26; }).strength(0.9))
-      .force('x', d3.forceX(function (d) { return anchor[d.group][0]; }).strength(stepMode ? 0.16 : 0.07))
-      .force('y', d3.forceY(function (d) { return anchor[d.group][1]; }).strength(stepMode ? 0.16 : 0.07))
+      .force('x', d3.forceX(function (d) { return targetOf(d)[0]; }).strength(function (d) { return d.sub ? 0.3 : stepMode ? 0.16 : 0.07; }))
+      .force('y', d3.forceY(function (d) { return targetOf(d)[1]; }).strength(function (d) { return d.sub ? 0.3 : stepMode ? 0.16 : 0.07; }))
       .force('cluster', clusterForce(0.25))
+      .force('subcluster', clusterForce(0.6, function (d) { return d.sub; }))
       .force('contain', containForce);
 
     function crossing(l) { return l.source.group !== l.target.group; }
@@ -752,11 +876,13 @@
       var hulls = groups.filter(function (k) { return by[k]; }).map(function (k) { return { k: k, pts: hull(by[k], 46) }; });
       if (stepMode) {
         // one oval per step, fitted around its objects
+        // centred on the step's own disc and never larger than it (+ a margin smaller than half the gap),
+        // so neighbouring steps' ovals cannot cross even when a few objects sit off to one side
         var ovals = groups.filter(function (k) { return by[k]; }).map(function (k) {
-          var pts = by[k], cx = d3.mean(pts, function (p) { return p[0]; }), cy = d3.mean(pts, function (p) { return p[1]; });
-          var rx = Math.max(95, d3.max(pts, function (p) { return Math.abs(p[0] - cx); }) + 70);
-          var ry = Math.max(70, d3.max(pts, function (p) { return Math.abs(p[1] - cy); }) + 62);
-          return { k: k, cx: cx, cy: cy, rx: rx, ry: ry };
+          var pts = by[k], c = anchor[k], cap = stepR[k] + 30;
+          var rx = Math.min(cap, Math.max(95, d3.max(pts, function (p) { return Math.abs(p[0] - c[0]); }) + 70));
+          var ry = Math.min(cap, Math.max(70, d3.max(pts, function (p) { return Math.abs(p[1] - c[1]); }) + 62));
+          return { k: k, cx: c[0], cy: c[1], rx: rx, ry: ry };
         });
         hullLayer.selectAll('ellipse').data(ovals, function (d) { return d.k; }).join('ellipse').attr('class', 'step-oval')
           .attr('cx', function (d) { return d.cx; }).attr('cy', function (d) { return d.cy; })
@@ -768,6 +894,21 @@
           .attr('text-anchor', 'middle').attr('x', function (d) { return d.cx; }).attr('y', function (d) { return d.cy - d.ry - 8; })
           .text(function (d) { return stepLabel(d.k); })
           .on('click', function (evt, d) { evt.stopPropagation(); showStep(d.k); });
+        // sub-groups: an inner halo around each set inside its step oval
+        var bySub = {};
+        nodes.forEach(function (d) { if (d.sub) (bySub[d.sub] = bySub[d.sub] || { step: d.group, name: d.subName, pts: [], ids: [] }).pts.push([d.x, d.y]); });
+        nodes.forEach(function (d) { if (d.sub) bySub[d.sub].ids.push(d.id); });
+        var subs = Object.keys(bySub).map(function (k) { var s = bySub[k]; return { k: k, step: s.step, name: s.name, ids: s.ids, pts: hull(s.pts, 24) }; });
+        subLayer.selectAll('path').data(subs, function (d) { return d.k; }).join('path').attr('class', 'sub-halo')
+          .attr('d', function (d) { return lineGen(d.pts); })
+          .attr('fill', function (d) { return gColor[d.step]; }).attr('stroke', function (d) { return gColor[d.step]; })
+          .on('mouseenter', function (evt, d) { showTip(evt, '<div class="t">' + esc(subLabel(d.name, d.ids.length)) + '</div><div class="s">' + esc(d.ids.join(' · ')) + '</div>'); })
+          .on('mouseleave', hideTip);
+        subLayer.selectAll('text').data(subs, function (d) { return d.k; }).join('text').attr('class', 'sub-label')
+          .attr('text-anchor', 'middle')
+          .attr('x', function (d) { return d3.mean(d.pts, function (p) { return p[0]; }); })
+          .attr('y', function (d) { return d3.min(d.pts, function (p) { return p[1]; }) - 4; })
+          .text(function (d) { return subLabel(d.name, d.ids.length); });
         paramBadges(badgeLayer, v.edges, function (e) {
           var s = idx[e.source], t = idx[e.target]; return [(s.x + t.x) / 2, (s.y + t.y) / 2];
         });
@@ -1114,6 +1255,14 @@
       '<span class="chip state-' + esc(s.state) + '">' + esc(s.state) + '</span>' +
       (n.step ? '<span class="chip" data-step="' + esc(n.step) + '" style="cursor:pointer">step ' + esc(stepLabel(n.step)) + '</span>' : '') +
       (n.final_version ? '<span class="chip"><span class="star">★</span> final v' + n.final_version + '</span>' : '') +
+      (function (p) {
+        if (!p) return '';
+        return (p.pushed ? '<a class="chip org-ok" href="' + esc(p.repo) + '" target="_blank" rel="noopener" title="Clean code pushed to GitHub">↑ GitHub' +
+            (p.visibility ? ' · ' + esc(p.visibility) : '') + ' @ ' + esc(p.commit) + '</a>'
+          : '<span class="chip state-missing" title="Record meta.repo and meta.commit after pushing the clean code">not pushed</span>') +
+          '<span class="chip ' + (p.saved === 'ok' ? 'org-ok' : 'state-missing') + '" title="Copy of the pipeline code at the destination">' +
+          (p.saved === 'ok' ? 'code saved' : p.saved ? 'code copy ' + esc(p.saved.replace(/_/g, ' ')) : 'code not saved') + '</span>';
+      })(pipeStatus(n)) +
       ((DATA.hidden || {})[n.id] ? '<span class="chip" title="' + esc(DATA.hidden[n.id]) + '">hidden · ' + esc(DATA.hidden[n.id]) + '</span>' : '') +
       (n.groups || []).map(function (g) { return '<span class="chip">#' + esc(g) + '</span>'; }).join('') + '</div>';
     html += '<div class="actions">' +
@@ -1122,6 +1271,7 @@
       '<button class="btn" data-act="note" ' + (LIVE ? '' : 'disabled') + '>Add note</button>' +
       '<button class="btn" data-act="hide" ' + (LIVE ? '' : 'disabled') + ' title="Hide from view for focus; nothing is deleted">' + ((DATA.hidden || {})[n.id] ? 'Unhide' : 'Hide') + '</button>' +
       '<button class="btn" data-act="lineage">Lineage view</button>' +
+      (LIVE ? '<button class="btn danger" data-act="delete" title="Delete this object from the network; shows first what goes with it. Files and saved copies are kept.">Delete…</button>' : '') +
       (LIVE && n.path ? '<button class="btn" data-act="organize" title="Copy this object to the project destination, into the folder of its step / group (same as double-clicking the node)">' +
         ((DATA.organized || {})[n.id] ? ((DATA.organized[n.id].state === 'ok') ? 'Copy again to destination' : 'Update copy at destination') : 'Save to destination') + '</button>' : '') +
       '</div>' +
@@ -1139,7 +1289,12 @@
       '<div class="k">updated</div><div class="v">' + esc(when(n.updated)) + '</div>' +
       ((n.tags || []).length ? '<div class="k">tags</div><div class="v">' + esc(n.tags.join(', ')) + '</div>' : '') +
       Object.keys(n.meta || {}).filter(function (k) { return k !== 'origin'; }).map(function (k) {
-        var val = n.meta[k]; if (typeof val === 'object') val = JSON.stringify(val);
+        var val = n.meta[k];
+        if (k === 'code' && Array.isArray(val))
+          return '<div class="k">code saved</div><div class="v mono">' + esc(val.join(', ')) + '</div>';
+        if (typeof val === 'object') val = JSON.stringify(val);
+        if (k === 'repo' && /^https?:\/\//.test(String(val)))
+          return '<div class="k">GitHub</div><div class="v"><a class="nid" href="' + esc(val) + '" target="_blank" rel="noopener">' + esc(val) + '</a></div>';
         if (k === 'url' && /^https?:\/\//.test(String(val)))
           return '<div class="k">web address</div><div class="v"><a class="nid" href="' + esc(val) + '" target="_blank" rel="noopener">' + esc(val) + '</a></div>';
         return '<div class="k">' + esc(k.replace(/_/g, ' ')) + '</div><div class="v mono">' + esc(val) + '</div>';
@@ -1157,6 +1312,10 @@
 
     html += renderBranches(n);
     html += renderUpdates(n);
+    var pnAll = notesFor(n.id, true);
+    html += '<div class="sec"><h3>Project notes &amp; issues' + (pnAll.length ? ' (' + pnAll.length + ')' : '') + '</h3>' +
+      (pnAll.length ? pnAll.map(function (x) { return pnoteHtml(x, true); }).join('') : '<div class="muted">None about this object.</div>') +
+      (LIVE ? '<div class="actions"><button class="btn" data-pnadd="' + esc(n.id) + '">Add project note about ' + esc(n.id) + '</button></div>' : '') + '</div>';
     html += '<div class="sec"><h3>Notes</h3>' + ((n.notes || []).length ? n.notes.slice().reverse().map(function (x) {
       return '<div class="note-item"><div class="when">' + esc(when(x.ts)) + ' · ' + esc(x.actor || 'user') + '</div>' + esc(x.text) + '</div>';
     }).join('') : '<div class="muted">No notes.</div>') + '</div>';
@@ -1353,6 +1512,123 @@
     var t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block';
     clearTimeout(toast._t); toast._t = setTimeout(function () { t.style.display = 'none'; }, 3200);
   }
+  function projectNotesSectionFull() {
+    var all = (DATA.project_notes || []).slice().sort(function (a, b) {
+      return (a.status === 'open' ? 0 : 1) - (b.status === 'open' ? 0 : 1) || (a.kind === 'issue' ? 0 : 1) - (b.kind === 'issue' ? 0 : 1); });
+    var open = all.filter(function (x) { return x.status === 'open'; }), done = all.filter(function (x) { return x.status !== 'open'; });
+    return '<h3 class="pa-h">Project notes &amp; open issues' + (open.length ? ' (' + open.length + ' open)' : '') + '</h3>' +
+      (open.length ? open.map(function (x) { return pnoteHtml(x, true); }).join('') : '<div class="muted" style="font-size:12.5px">No open notes.</div>') +
+      (done.length ? '<details class="pnote-done"><summary class="muted">' + done.length + ' resolved</summary>' + done.map(function (x) { return pnoteHtml(x, true); }).join('') + '</details>' : '') +
+      (LIVE ? '<div class="actions"><button class="btn" data-pnadd="">Add project note\u2026</button></div>' : '');
+  }
+
+  function projectNotesSection() {
+    var open = (DATA.project_notes || []).filter(function (x) { return x.status === 'open'; });
+    var iss = open.filter(function (x) { return x.kind === 'issue'; }).length;
+    return '<h3 class="pa-h">Project notes</h3><div class="pn-summary">' +
+      (open.length ? '<b>' + open.length + '</b> open' + (iss ? ' \u00b7 <span class="pn-iss">' + iss + ' open issue' + (iss > 1 ? 's' : '') + '</span>' : '')
+                   : 'No open notes') +
+      ' <a class="nid" data-gonotes="1">Open the Notes tab \u2192</a></div>';
+  }
+
+  // ------------------------------------------------------------- notes page ----
+  var notesFilter = 'open', notesForm = false;
+  function paintNotesBadge() {
+    var b = document.getElementById('notes-badge'); if (!b || !DATA) return;
+    var open = (DATA.project_notes || []).filter(function (x) { return x.status === 'open'; });
+    var iss = open.filter(function (x) { return x.kind === 'issue'; }).length;
+    b.textContent = open.length || '';
+    b.className = 'tab-badge' + (iss ? ' has-issue' : '');
+    b.title = open.length ? open.length + ' open (' + iss + ' issue' + (iss === 1 ? '' : 's') + ')' : '';
+  }
+  function renderNotes() {
+    var el = document.getElementById('notes');
+    var all = (DATA.project_notes || []).slice().sort(function (a, b) {
+      return (a.status === 'open' ? 0 : 1) - (b.status === 'open' ? 0 : 1) || (a.kind === 'issue' ? 0 : 1) - (b.kind === 'issue' ? 0 : 1) ||
+        String(b.updated || b.ts).localeCompare(String(a.updated || a.ts)); });
+    var F = { open: function (x) { return x.status === 'open'; }, issues: function (x) { return x.kind === 'issue' && x.status === 'open'; },
+              notes: function (x) { return x.kind === 'note' && x.status === 'open'; }, resolved: function (x) { return x.status !== 'open'; },
+              all: function () { return true; } };
+    var count = function (k) { return all.filter(F[k]).length; };
+    var seg = '<div class="seg">' + [['open', 'Open'], ['issues', 'Open issues'], ['notes', 'Notes'], ['resolved', 'Resolved'], ['all', 'All']].map(function (m) {
+      return '<button class="' + (notesFilter === m[0] ? 'on' : '') + '" data-nfilter="' + m[0] + '">' + m[1] + ' <span class="muted">' + count(m[0]) + '</span></button>'; }).join('') + '</div>';
+    var form = notesForm ? '<form class="pn-form" id="pn-form"><label>Note</label><textarea id="pn-text" rows="4" placeholder="What should be remembered about this project?" required></textarea>' +
+      '<label>About objects <span class="muted">(IDs separated by spaces, optional)</span></label><input type="text" id="pn-nodes" placeholder="e.g. IN44 R28 R29">' +
+      '<div class="pn-kind"><label><input type="radio" name="pn-kind" value="note" checked> Note</label>' +
+      '<label><input type="radio" name="pn-kind" value="issue"> Open issue <span class="muted">(red ! on its objects until resolved)</span></label></div>' +
+      '<div class="row"><button type="button" class="btn" data-pncancel="1">Cancel</button><button type="submit" class="btn primary">Save note</button></div></form>' : '';
+    var list = all.filter(F[notesFilter]);
+    el.innerHTML = '<div class="notes-page"><div class="notes-head"><h2>' + NOTE_ICON + 'Project notes &amp; open issues</h2>' +
+      (LIVE && !notesForm ? '<button class="btn primary" data-pnnew="1">+ New note</button>' : '') + '</div>' +
+      '<p class="muted">Findings, caveats and open questions about the project. Each note can point at the objects it is about; ' +
+      'click an ID to see it in the network.</p>' + form + seg +
+      (list.length ? list.map(function (x) { return pnoteHtml(x, true); }).join('') : '<p class="muted">Nothing here.</p>') + '</div>';
+    if (notesForm) {
+      document.getElementById('pn-text').focus();
+      document.getElementById('pn-form').onsubmit = function (evt) {
+        evt.preventDefault();
+        var text = document.getElementById('pn-text').value.trim(); if (!text) return;
+        var nodes = document.getElementById('pn-nodes').value.split(/[\s,]+/).filter(Boolean);
+        var bad = nodes.filter(function (k) { return !byId[k]; });
+        if (bad.length) { toast('\u26a0 unknown object(s): ' + bad.join(', ')); return; }
+        var kind = (document.querySelector('input[name="pn-kind"]:checked') || {}).value || 'note';
+        post('api/pnote', { text: text, nodes: nodes, kind: kind }).then(function (r) { toast(r.message); notesForm = false; return refresh(true); })
+          .catch(function (err) { toast('\u26a0 ' + err.message); });
+      };
+    }
+  }
+  function notesClick(evt) {
+    var t = evt.target.closest('[data-nfilter],[data-pnnew],[data-pncancel],[data-goto],[data-pnstatus],[data-pncomment]');
+    if (!t) return;
+    if (t.dataset.nfilter) { notesFilter = t.dataset.nfilter; renderNotes(); return; }
+    if (t.dataset.pnnew) { notesForm = true; renderNotes(); return; }
+    if (t.dataset.pncancel) { notesForm = false; renderNotes(); return; }
+    if (t.dataset.goto) { goTo(t.dataset.goto); return; }
+    if (t.dataset.pnstatus) {
+      var why = prompt((t.dataset.to === 'resolved' ? 'Resolve ' : 'Reopen ') + t.dataset.pnstatus + ' \u2014 why? (optional)', '');
+      if (why !== null) act(post('api/pnote', { id: t.dataset.pnstatus, status: t.dataset.to, comment: why || null }));
+      return;
+    }
+    if (t.dataset.pncomment) { var c = prompt('Comment on ' + t.dataset.pncomment + ':', ''); if (c) act(post('api/pnote', { id: t.dataset.pncomment, comment: c })); }
+  }
+  document.getElementById('notes').addEventListener('click', notesClick);
+
+  // delete: the server computes what goes (the object, its links, objects linked only to it);
+  // the user sees the whole list before anything happens
+  function confirmDelete(id) {
+    post('api/remove-preview', { node: id }).then(function (plan) {
+      var lab = plan.labels, also = plan.also || [];
+      var row = function (k) { return '<li><b>' + esc(k) + '</b> · ' + esc(lab[k] || '') + '</li>'; };
+      var html = '<div class="modal"><h3>Delete ' + esc(id) + ' · ' + esc(lab[id]) + '?</h3>' +
+        (also.length ? '<p>These objects were made from it and are linked to nothing else, so they go too:</p><ul class="del-list">' + also.map(row).join('') + '</ul>'
+                     : '<p>No other object depends only on it.</p>') +
+        ((plan.orphaned || []).length ? '<p>Kept, but left <b>without any link</b> (inputs it used; delete them separately if not needed):</p><ul class="del-list">' +
+          plan.orphaned.map(row).join('') + '</ul>' : '') +
+        '<p>' + plan.edges.length + ' link(s) removed' + (plan.edges.length ? ':' : '.') + '</p>' +
+        (plan.edges.length ? '<ul class="del-list mono">' + plan.edges.map(function (e) {
+          return '<li>' + esc(e.source) + ' —' + esc(e.rel) + '→ ' + esc(e.target) + '</li>'; }).join('') + '</ul>' : '') +
+        (plan.script_refs.length ? '<p>The script reference is cleared on ' + plan.script_refs.length + ' other link(s).</p>' : '') +
+        (Object.keys(plan.analyses).length ? '<p>Unlinked from history: ' + Object.keys(plan.analyses).map(function (k) {
+          return esc(k) + ' (' + esc(plan.analyses[k].join(', ')) + ')'; }).join(', ') + '. The history entries themselves stay.</p>' : '') +
+        '<p class="muted">Files on disk, stored versions' + (Object.keys(plan.copies).length ? ' and the saved copies at the destination (' +
+          Object.keys(plan.copies).length + ')' : '') + ' are kept.</p>' +
+        '<div class="row"><button class="btn" data-del="cancel">Cancel</button>' +
+        '<button class="btn danger primary" data-del="go">Delete ' + (1 + also.length) + ' object(s)</button></div></div>';
+      var bg = document.createElement('div'); bg.className = 'modal-bg open'; bg.innerHTML = html;
+      document.body.appendChild(bg);
+      bg.addEventListener('click', function (evt) {
+        var b = evt.target.closest('[data-del]');
+        if (evt.target === bg || (b && b.dataset.del === 'cancel')) { bg.remove(); return; }
+        if (b && b.dataset.del === 'go') {
+          bg.remove();
+          post('api/remove', { node: id, expect_also: also }).then(function (r) {
+            toast(r.message); clearSelection(); return refresh(true);
+          }).catch(function (err) { toast('⚠ ' + err.message); });
+        }
+      });
+    }).catch(function (err) { toast('⚠ ' + err.message); });
+  }
+
   function act(promise) {
     promise.then(function (res) { toast(res.message || 'done'); return refresh(true); })
       .catch(function (err) { toast('⚠ ' + err.message); });
@@ -1362,6 +1638,22 @@
     var stepEl = evt.target.closest('[data-step]');
     if (stepEl) { showStep(stepEl.dataset.step); return; }
     if (evt.target.closest('[data-gohist]')) { setPage('history'); return; }
+    if (evt.target.closest('[data-gonotes]')) { setPage('notes'); return; }
+    var pnEl = evt.target.closest('[data-pnadd],[data-pnstatus],[data-pncomment]');
+    if (pnEl) {
+      if (pnEl.hasAttribute('data-pnadd')) {
+        if (pnEl.dataset.pnadd) addProjectNote([pnEl.dataset.pnadd]);
+        else { notesForm = true; setPage('notes'); }
+      }
+      else if (pnEl.dataset.pnstatus) {
+        var why = prompt((pnEl.dataset.to === 'resolved' ? 'Resolve ' : 'Reopen ') + pnEl.dataset.pnstatus + ' \u2014 why? (optional)', '');
+        if (why !== null) act(post('api/pnote', { id: pnEl.dataset.pnstatus, status: pnEl.dataset.to, comment: why || null }));
+      } else {
+        var c = prompt('Comment on ' + pnEl.dataset.pncomment + ':', '');
+        if (c) act(post('api/pnote', { id: pnEl.dataset.pncomment, comment: c }));
+      }
+      return;
+    }
     var dt = evt.target.closest('[data-dsave],[data-dshow],[data-dopen],[data-dchange],[data-dall]');
     if (dt) {
       if (dt.dataset.dsave) organizeNode(dt.dataset.dsave);
@@ -1405,6 +1697,7 @@
       case 'note': var txt = prompt('Note for ' + n.id, ''); if (txt) act(post('api/note', { node: n.id, text: txt })); break;
       case 'hide': act(post('api/hide', { node: n.id, hidden: !(DATA.hidden || {})[n.id] })); break;
       case 'lineage': setView('lineage'); break;
+      case 'delete': confirmDelete(n.id); break;
       case 'organize': organizeNode(n.id); break;
       case 'verify': post('api/verify', { node: n.id }).then(function (r) { toast(r.message); pollJobs(); }).catch(function (e) { toast(e.message); }); break;
       case 'reveal': post('api/reveal', { node: n.id }).then(function (r) { toast(r.message); }).catch(function (e) { toast(e.message); }); break;
@@ -1503,6 +1796,8 @@
       var stale = comps.filter(function (e) { return e.stale || st(e.source).stale; }).length;
       return '<div class="card"><h2>' + nidLink(a.id) + ' ' + esc(a.label) + '</h2><div class="sub">' + esc((a.meta || {}).folder || '') +
         ' · ' + comps.length + ' components' + (stale ? ' · <b>' + stale + ' need update</b> (<code>sciweave article sync ' + esc(a.id) + '</code>)' : '') + '</div>' +
+        (LIVE ? '<div class="actions" style="margin:8px 0"><a class="btn primary" style="text-decoration:none" href="latex.html?article=' +
+          encodeURIComponent(a.id) + '">Open LaTeX editor</a></div>' : '') +
         comps.map(function (e) {
           var n = byId[e.source], s = st(n.id), fill = catColor(catOf(n));
           var ver = e.placed_version ? 'placed v' + e.placed_version : 'v' + (n.current_version || '-');
@@ -1877,13 +2172,18 @@
     if (p === 'network') render();
     if (p === 'articles') renderArticles();
     if (p === 'history') renderHistory();
+    if (p === 'notes') renderNotes();
+    paintNotesBadge();
   }
   function setView(v) { state.view = v; store('view', v); document.getElementById('view-select').value = v; render(); }
 
   document.querySelectorAll('.tab').forEach(function (b) { b.onclick = function () { setPage(b.dataset.page); }; });
   var viewSel = document.getElementById('view-select'); viewSel.value = state.view; viewSel.onchange = function () { setView(viewSel.value); };
   var grpSel = document.getElementById('group-select'); grpSel.value = state.groupBy;
-  grpSel.onchange = function () { state.groupBy = grpSel.value; store('groupBy', state.groupBy); state.zoom = {}; render(); };
+  var subSel = document.getElementById('sub-select'), subLab = document.getElementById('sub-label');
+  function syncSubCtl() { subSel.value = state.subBy; subLab.style.display = state.groupBy === 'step' ? '' : 'none'; }
+  grpSel.onchange = function () { state.groupBy = grpSel.value; store('groupBy', state.groupBy); state.zoom = {}; syncSubCtl(); render(); };
+  subSel.onchange = function () { state.subBy = subSel.value; store('subBy', state.subBy); state.relayout = true; render(); };
   [['show-refs', 'showRefs'], ['show-code', 'showCode'], ['show-params', 'showParams'], ['show-legend', 'showLegend'], ['show-hidden', 'showHidden']].forEach(function (p) {
     var el = document.getElementById(p[0]); el.checked = state[p[1]];
     el.onchange = function () { state[p[1]] = el.checked; store(p[1], el.checked); if (p[1] === 'showLegend') renderLegend(); else render(); };
@@ -2004,8 +2304,10 @@
       }
       sig = s; DATA = d; index();
       setPage(state.page);
+      var keep = panelEl.scrollTop;
       if (state.selected && byId[state.selected]) renderPanel();
       else if (state.showingDest) renderProjectPanel();
+      panelEl.scrollTop = keep;  // a live refresh must not throw the reader back to the top
       loadSuggestions(false);
     });
   }
@@ -2029,7 +2331,9 @@
     if (VIEWS[qs.view]) { state.view = qs.view; viewSel.value = qs.view; }
     if (!state.groupBy) state.groupBy = Object.keys(DATA.steps || {}).length ? 'step' : 'category';
     if (qs.group) { state.groupBy = qs.group; grpSel.value = qs.group; }
+    if (qs.sub) state.subBy = qs.sub;
     grpSel.value = state.groupBy;
+    syncSubCtl();
     if (qs.theme === 'dark' || qs.theme === 'light') document.documentElement.setAttribute('data-theme', qs.theme);
     if (qs.page === 'analyses') { qs.page = 'history'; histMode = 'analyses'; }
     if (qs.analysis && A()[qs.analysis]) {  // ?analysis=<key> opens that analysis in the guide
@@ -2041,7 +2345,7 @@
     }
     // an empty network with an analysis history opens on the guide
     var dflt = !DATA.nodes.length && Object.keys(DATA.analyses || {}).length ? 'history' : 'network';
-    var startPage = ['network', 'articles', 'history'].indexOf(qs.page) >= 0 ? qs.page : dflt;
+    var startPage = ['network', 'articles', 'history', 'notes'].indexOf(qs.page) >= 0 ? qs.page : dflt;
     // open the project panel BEFORE the first drawing: the network is then laid out for the width it
     // really has (otherwise it is drawn full-width, squeezed when the panel opens, and jumps on redraw)
     if (LIVE && !state.selected && qs.panel !== 'suggestions' && startPage === 'network') renderProjectPanel();

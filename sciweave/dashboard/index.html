@@ -23,6 +23,7 @@ __CSS__
     <button class="tab active" data-page="network">Network</button>
     <button class="tab" data-page="articles">Articles</button>
     <button class="tab" data-page="history">History</button>
+<button class="tab tab-notes" data-page="notes" title="Project notes and open issues"><svg class="note-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5z" fill="var(--note)" stroke="var(--note-ink)" stroke-width="1.4" stroke-linejoin="round"/><path d="M15 3v4h4" fill="none" stroke="var(--note-ink)" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 11h8M8 14.5h8M8 18h5" stroke="var(--note-ink)" stroke-width="1.4" stroke-linecap="round"/></svg>Notes <span class="tab-badge" id="notes-badge"></span></button>
   </nav>
   <div class="spacer"></div>
   <div class="search" title="Highlight nodes as you type (id, label, type, tag, parameter)">
@@ -66,6 +67,13 @@ __CSS__
           <option value="recency">Recency (recent updates)</option>
         </select>
       </label>
+      <label id="sub-label" title="Inner halos inside each step oval: objects of one kind that belong together">Sub-groups
+        <select class="ctl" id="sub-select">
+          <option value="group">Sets (custom sub-groups)</option>
+          <option value="type">Same node type</option>
+          <option value="none">Off</option>
+        </select>
+      </label>
       <label title="Reference nodes (intermediates kept in their pipeline folders)"><input type="checkbox" id="show-refs" checked> references</label>
       <label><input type="checkbox" id="show-code" checked> script links</label>
       <label><input type="checkbox" id="show-params"> parameters on links</label>
@@ -93,6 +101,7 @@ __CSS__
 
   <section class="page" id="page-articles"><div class="scroll" id="articles"></div></section>
   <section class="page" id="page-history"><div class="scroll" id="history"></div></section>
+  <section class="page" id="page-notes"><div class="scroll" id="notes"></div></section>
 </main>
 
 <div class="tooltip" id="tooltip"></div>

@@ -127,6 +127,73 @@ plus an **article node** and one **section node per LaTeX section**.
 current) version into `figures/Figure_2.png` and links it `part_of` the article.
 When F1 changes, the placement turns stale; `sciweave article sync A1` refreshes.
 
+## 6b. The LaTeX editor (`manuscript.py`, `dashboard/latex.*`)
+
+The author's own manuscript folder can be the article, kept where it is:
+`sciweave tex attach <folder> "Title" --step article` registers it in place (`ref` article node,
+`meta.folder`, `meta.main`; one section node per `latex/sections/*.tex`, in `\input` order).
+Figures are not copied: `\graphicspath` points at wherever the author keeps them.
+
+Dashboard → Articles → **Open LaTeX editor** (`/latex.html?article=A1`, live only):
+file list · editor (highlighted `<pre>` under a transparent `<textarea>`, identical metrics, both
+always showing a scrollbar so wraps align) · PDF preview with clickable `file:line` errors.
+`Ctrl+S` saves, `Ctrl+Enter` saves + compiles (`latexmk -pdf`, else tectonic, else pdflatex; the last
+good PDF stays visible when a run fails). MiKTeX's latexmk needs perl; when perl is not on PATH, the compile adds
+Git for Windows' `usr/bin` (found from `git`) to the end of its PATH.
+
+**Claude never writes the .tex files.** It proposes: `sciweave tex propose A1 FILE --edits e.json -m why`
+(exact find/replace, each unique) or `--from new.tex`. A proposal stores the base hash and line hunks;
+each find/replace edit is one hunk; each hunk carries a word diff (numbers stay one token; a hunk
+that is mostly rewritten shows old struck / new added). The editor polls `api/tex/stamp` and shows new
+proposals live; the author accepts or rejects per hunk. Accepted hunks apply to the file *as it is now*
+(exact position, else the unique place its old lines are, else context for insertions); a hunk that
+cannot be placed is marked `conflict`, never forced. Saves refuse a stale `base_hash` (no silent
+overwrite of an accepted change or another window).
+
+State per article in `.sciweave/manuscripts/<A>/`: `proposals/P<n>.json`, `snapshots/<file>/` (previous
+text before every save / accepted hunk; History button), `compile.json`, `log.jsonl`. None of it takes
+the graph lock (the editor's POSTs are routed before it), so compiling never blocks the dashboard.
+The `sciweave-article` skill (shipped in `skills/`) is the writing protocol Claude follows.
+
+## 6c. Evidence numbers and linked items (`evidence.py`)
+
+The article folder (`meta.folder`) may hold `assets.tsv` (key, label, source, file: the article's
+figures/tables/supplements as **copies** of files kept elsewhere), `evidence.tsv` (id, target, page,
+quote, claim, note), `CitedArticles/index.tsv` (r1.. -> PDF) and `MetaData/`. `Evidence.build()` (run by
+every compile, or `sciweave tex evidence A build`):
+
+1. **sync**: copies an asset when its source's SHA-256 changed (state in
+   `.sciweave/manuscripts/<A>/assets_state.json`); the source stays the original.
+2. **annotate** (PyMuPDF, optional): for each cited quote, a highlight + a margin tag "E7" in
+   `CitedArticles/annotated/<file>`; the page found is used for the link. Cached on PDF hash + entries.
+3. **evidence.tex**: data macros (`\@namedef{sw@ev@E7}{{path}{page}{pdf|run}}`) plus `\ev`, `\figref`,
+   `\tabref`, `\supref`, a `[PDF]` link on each `\bibitem`, and `\swevidencelist`.
+4. **report**: every problem is listed, never hidden (quote not found, missing PDF, unknown id/key in the
+   text, unsafe path, duplicate id), and shown in the editor's Evidence panel.
+
+Three builds from one source, chosen by job name because latexmk on Windows strips backslashes from
+`-usepretex`: `main` with relative file links (GoToR to `#page`, Launch for others: work in a desktop
+viewer); `main` compiled by the server, which writes `build/main.swmode.tex` with `\swlinkbase` so links
+go to `/tex-asset/<A>/<path>` and work in the browser preview (latexmk is forced with `-g` when that mode
+changes, since it cannot see the file); and `main_submission` (`\ev` empty, refs plain text, no
+register). `/tex-asset/` serves only files inside the article folder (no dot-folders), text as
+`text/plain`. Link paths are restricted to `[A-Za-z0-9_./-]` so they go into `\href` unescaped.
+
+**Viewers** (`viewer.py`, stdlib): in server mode a non-PDF link goes to `/tex-view/<A>/ev/<E7>` or
+`/tex-view/<A>/asset/<F6>` (the id, not the path, so nothing needs URL-escaping inside TeX). The view
+picks a viewer by type: `.xlsx` (read with zipfile + ElementTree: shared strings, inline strings,
+numbers in general format, every sheet as a tab) and `.tsv/.csv` as tables with the rows matching the
+evidence's `where` (`sheet=...; find=a|b; row=n`) highlighted and scrolled into view (the first sheet
+with a match opens when no sheet is named); images with their `<key>.legend` text; text files with the
+terms marked. PDFs are redirected to `/tex-asset/...#page=N` (the browser's viewer shows the highlight
+annotation). Cell text is always HTML-escaped.
+
+**Missing** (`Evidence.missing()`, the editor's Missing tab): `gap` rows from `evidence_gaps.tsv`
+(file, anchor, kind unsourced|unsupported, claim, note; located by the anchor, `stale` when the text
+changed), `mismatch` (an entry whose note starts with MISMATCH), `nofile` (an entry whose file is not in
+the folder), and `unmarked` (a sentence with a digit and no `\ev`, in files that use markers, after
+removing citations, refs, comments, locus/SNP/band names and alphanumeric gene names; preamble lines skipped).
+
 ## 7. The Claude protocol (skill)
 
 Installed with `sciweave install-skill` into `~/.claude/skills/sciweave/`.
@@ -283,11 +350,59 @@ branch badge on alternatives.
   without an explicit yes per object; a "no" sets `organize_skip` (red dashed ring, not asked again,
   cleared when the object is copied on its own).
 
+- **Sub-groups inside steps**: a node's first group is its sub-group within its step (a set of
+  one kind that belongs together). The step view draws each set of 2+ as a dashed inner halo in
+  the step's hue, with a sub-cluster force (0.7) keeping members together inside the oval; the
+  "Sub-groups" selector switches between sets (custom groups), same node type, or off (`?sub=`).
+  `Project.suggest_groups` proposes sets for ungrouped objects: analysis-history `group` labels
+  first, then (step, type, file kind, same feeds/produces tie to one process) with 2+ members,
+  named by the common label prefix; `sciweave group --suggest [--apply]`. `plan check` warns
+  when a plan adds such a set without a group.
+- **Pipelines are pushed and saved**: a `pipeline` node keeps `meta.repo` / `meta.commit` /
+  `meta.visibility` (its clean code on GitHub) and `meta.code`, the list of code paths relative to
+  its entry file's folder. Organizing a pipeline copies only that code set (`Project.organize_source`,
+  `__pycache__` skipped), never its data or results; its staleness is a size/mtime fingerprint of
+  the code set, so new results do not mark the saved code as changed. The dashboard draws a small
+  badge on pipeline nodes (↑ green = pushed and saved, amber otherwise) and shows "GitHub @ commit"
+  and "code saved" chips plus the repo link in the panel.
+- **Project notes and open issues** (`graph["project_notes"]`, `Project.add_project_note` /
+  `update_project_note`, `sciweave pnote ls|add|comment|resolve|reopen`, POST `api/pnote`): project-wide
+  notes, each `note` or `issue`, `open` / `resolved`, about zero or more objects, with a comment log.
+  The Project actions panel lists them (open first, issues first); each object's panel shows those
+  about it; on the network an open issue puts a red "!" and a note a blue "i" on its objects.
+  Deleting an object keeps the note and drops the reference.
+- **Remote folders are not walked on every refresh**: folder fingerprints and file-selection
+  fingerprints of network-share paths are cached in fpcache.json; after REMOTE_DIR_TTL (600 s) the
+  cached value is still served while a background thread renews it (stale-while-revalidate), so the
+  dashboard never waits on a share (a 17,000-file results tree took 97 s per refresh). Only the status
+  display uses the cache; saving versions and copies always read fresh.
+- **Folder nodes can save a selection** (`meta.include`: file paths or glob patterns relative to the
+  folder): "save to destination" copies only those files, e.g. the credible-set and PIP files of a
+  5 GB fine-mapping results tree.
+- **Delete shows what goes first** (`Project.removal_plan` / `remove_nodes`; dashboard "Delete…",
+  `sciweave rm ID [--dry-run|--yes]`): the object, its links, and every object that depends on it alone
+  (made from it, i.e. a link points from a deleted object to it, and linked to nothing that stays;
+  repeated down the chain). Inputs that fed only the deleted object are kept and listed as "left without
+  links": upstream data is never deleted automatically. History entries are unlinked, not removed;
+  files, stored versions and saved copies at the destination are kept. The server recomputes the plan
+  on delete and refuses if it differs from the preview the user confirmed.
+- **One copy path per object**: two objects whose files share a name and land in one folder (five
+  runs' `metal.simple.tsv.gz`) both get their id as prefix. `_organized_name` decides this from every
+  object that *will* land in the folder, not only from recorded copies, because parallel copy jobs
+  computed names before either was recorded and overwrote each other (found 2026-10-02).
+  `organize_copy` / `organize_record` refuse a path recorded for another object, and
+  `organized_state` reports `copy_conflict` for any shared path; Update re-copies it under its own name.
 - **Copies are jobs, not threads** (`sciweave/jobs.py`): each copy / verification is a JSON file in
   `.sciweave/jobs/` run by its own detached process (`sciweave -C <root> job <id>`), so closing or
   restarting the dashboard never stops it. The process writes progress (bytes done / total over the
   copy + check passes, phase, heartbeat every <= 0.5 s); `GET api/jobs` reads the files; a job without a
-  heartbeat for 60 s is "interrupted" (retrying clears its `*.sciweave-part` leftovers). At most 2
+  heartbeat for 60 s is "interrupted". Retrying a folder copy resumes its `*.sciweave-part` folder:
+  files already copied and checked are kept when the source still has the same size and mtime (only
+  re-hashed locally for the checksum file); a half-written file is rewritten. A transient read/write
+  error (SMB shares raise e.g. `OSError [Errno 22] Invalid argument` on a file that reads fine a
+  moment later) does not fail the job: the file is reopened and continued at the last byte written,
+  up to 5 attempts with 2/4/8/16 s back-off; the final error names the file, and the job's
+  traceback goes to `.sciweave/jobs/<id>.log`. At most 2
   copies per project run at once, the rest are "queued". Writes to graph.json from a job and from the
   dashboard's POSTs are serialised by a lock file (`jobs.graph_lock`). `organize --clean` removes
   leftovers of interrupted copies when nothing is running. The dashboard shows per-object and overall

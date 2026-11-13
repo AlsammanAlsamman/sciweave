@@ -136,15 +136,51 @@ def scan(p: Project, extra: list[Path] | None = None, cache: HashCache | None = 
     return {"groups": dup_groups, "whole": whole, "partial": partial}
 
 
+def _existing_index(p: Project, cache: HashCache):
+    """The network's files, listed once per network state and kept on the cache: {owner: [(file, size)]} and
+    {size: [(owner, file)]}. Before, every check_new() re-walked every node's files (folders on network shares
+    included), once per checked path -- a 200-node plan walked the whole network 200 times (hours, and memory)."""
+    key = (id(p.graph), len(p.nodes), len(p.edges))
+    idx = getattr(cache, "_existing", None)
+    if idx and idx[0] == key:
+        return idx[1], idx[2]
+    owners: dict[str, list[tuple[Path, int]]] = {}
+    by_size: dict[int, list[tuple[str, Path]]] = defaultdict(list)
+    for nid in p.nodes:
+        fs = _node_files(p, nid)
+        if fs:
+            owners[nid] = fs
+            for f, size in fs:
+                by_size[size].append((nid, f))
+    cache._existing = (key, owners, by_size)
+    return owners, by_size
+
+
 def check_new(p: Project, path: Path, cache: HashCache | None = None) -> dict:
-    """Is the content of `path` already in the network? -> {"same_as": [ids], "overlaps": [ids]}"""
+    """Is the content of `path` already in the network? -> {"same_as": [ids], "overlaps": [ids]}
+
+    same_as: nodes whose files are, as a set of contents, identical to `path`'s; overlaps: nodes sharing some identical
+    file with it (same answers as scan(p, extra=[path]), computed against an index of the network's files that is built
+    once per network state instead of once per call)."""
     path = Path(path)
-    res = scan(p, extra=[path], cache=cache)
-    key = f"new:{path}"
-    same = [r["a"] if r["b"] == key else r["b"] for r in res["whole"] if key in (r["a"], r["b"])]
-    over = [r["a"] if r["b"] == key else r["b"] for r in res["partial"] if key in (r["a"], r["b"])]
-    return {"same_as": [x for x in same if not x.startswith("new:")],
-            "overlaps": [x for x in over if not x.startswith("new:")]}
+    cache = cache or HashCache(p)
+    owners, by_size = _existing_index(p, cache)
+    new = [(f, f.stat().st_size) for f in files_of(path) if f.stat().st_size >= MIN_BYTES]
+    shared: dict[str, set] = {}
+    for f, size in new:
+        if size not in by_size:
+            continue
+        digest = cache.sha256(f)
+        for owner, g in by_size[size]:
+            if cache.sha256(g) == digest:
+                shared.setdefault(owner, set()).add(digest)
+    same, over = [], []
+    if shared:
+        new_hashes = {cache.sha256(f) for f, _ in new}
+        for owner in shared:
+            (same if {cache.sha256(g) for g, _ in owners[owner]} == new_hashes else over).append(owner)
+    cache.save()
+    return {"same_as": sorted(same), "overlaps": sorted(over)}
 
 
 # ------------------------------------------------------------------ merging --

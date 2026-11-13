@@ -84,6 +84,49 @@ When the user asks to add results from the current work to the project:
    (`T3 · Credible sets (finemapping)`), what is now stale, and suggest
    `sciweave serve` to see it.
 
+## Adding a pipeline: code to GitHub, used results to the destination
+
+A pipeline step records **only** the pipeline's pure code, its configuration and
+parameters, and the results that later analyses actually used. When a step's
+pipeline is added (Snakemake, Nextflow, a driver-script folder):
+
+1. **Ask for the pipeline's GitHub repository** (one question; none yet → offer a
+   new *private* repo). Clone it to a temporary folder.
+2. **Compare local vs GitHub**: file list, content diff, last commit date vs the
+   local files' dates. Same → record the repo commit. **Local newer** → prepare a
+   cleaned push (step 3). GitHub newer → tell the user; never overwrite local.
+3. **Clean, then push (only after the user agrees; private repos only):**
+   - keep: entry file (`Snakefile`), rules, the scripts the rules actually call, helper
+     modules, config loader, small *public* references the rules read;
+   - turn study configs into generic `*.example.yaml` (parameters kept; dataset
+     names, paths, sample counts, notes removed) and git-ignore the real ones;
+   - never push: input data, results, sample-ID files (`.fam`, `.psam`, keep
+     lists), logs, local paths, cohort / disease names, rsIDs or findings in
+     comments, reports, ad hoc study scripts not called by any rule;
+   - scan the cleaned copy for study names, IDs, paths and dates before committing;
+     tag the previous remote version (`v<YYYY.MM>-legacy`) when replacing it.
+4. **In the network:** one `pipeline` node (path = local entry file,
+   `meta: {"repo": url, "commit": sha, "visibility": "private",
+   "code": ["Snakefile", "rules", "scripts", "config"]}`). `code` is what "save to
+   destination" copies for a pipeline (paths relative to the entry file's folder,
+   caches skipped), so the pipeline is both **pushed** (GitHub, clean) and **saved**
+   (destination, the local code incl. real configs); the dashboard shows both on the
+   node (↑ badge, chips). Then `organize` the pipeline too. The real config snapshotted as a managed
+   `input` (it stays in the project, never on GitHub); the run's result-changing
+   parameters on each `produces` link, plus `params_file` = the config.
+5. **Results: only what was used.** For every output, ask "did a later step or the
+   article use it?" Keep those, plus the pipeline's own QC / run reports and small
+   derived lists that define the run (e.g. the LD-pruned SNP set behind the PCA).
+   Leave out intermediate filesets (QC'd / pruned genotypes), raw tool outputs that
+   a formatted file replaces, logs and `.done` files.
+   For example, gwassnakemake keeps the PCA (eigenvec / eigenval / covariates /
+   selected-PC JSON / variance table and plots), the formatted summary
+   statistics, the pruned SNP list, the QC/GWAS report and the Manhattan plot.
+6. **Back up what is not backed up.** For each kept result check whether a
+   verified copy already exists (`organized` in the destination, or managed in
+   the project). If not, `organize` it into the destination. Say how big before
+   copying gigabytes.
+
 ## Other everyday actions (always pass `--actor claude`)
 
 | user intent | command |
@@ -94,10 +137,15 @@ When the user asks to add results from the current work to the project:
 | the user picks the real one | `sciweave --actor claude branch main T2b --why "..."` |
 | what changed since the last look | `sciweave suggest` (the `sciweave-monitor` skill runs this hourly) |
 | cosmetic re-render only (fonts, colours) | `sciweave --actor claude save F1 --no-refresh -m "bigger font"` |
+| stale, but checked: the changed input does not affect it (shared config gained another target; it was rebuilt from that input before the input was saved) | `sciweave --actor claude confirm R8 --parents IN34 --why "what was checked"` (no re-run, no new version; never for a real change) |
 | this is the final version | `sciweave --actor claude final F2` |
 | start an article | `sciweave --actor claude article new "Title"` |
 | put a figure/table in the article | `sciweave --actor claude article place F2 A1 --as "Figure 2"` |
 | refresh placed items after updates | `sciweave --actor claude article sync A1` |
+| the author's LaTeX folder should become the article (kept in place) | `sciweave --actor claude tex attach <folder> "Title" --step article` |
+| change the article's text | never edit the .tex: propose (`sciweave --actor claude tex propose A1 FILE --edits e.json -m "why"`); follow the **sciweave-article** skill |
+| an object should not be in the network | `sciweave rm ID --dry-run`, show the user the list, then `sciweave --actor claude rm ID` (`--yes` if others go too) |
+| a finding, caveat or open question about the project | `sciweave --actor claude pnote add "text" --about ID ... [--issue]` (issue = red ! on the network until resolved); `pnote resolve PN<n> "why"` |
 | remember something about a node | `sciweave --actor claude note T2 "HLA excluded"` |
 | what needs redoing | `sciweave status` (then regenerate in upstream order) |
 | old version back | `sciweave restore F2 1 --out /tmp/F2_v1.png` |
@@ -176,6 +224,31 @@ with links drawn within and between steps.
 - A new stage → define it in the plan's `"steps"` with a label and order (ask the user where
   it sits in the sequence if unclear). Never leave objects without a step.
 - Fix an existing object: `sciweave --actor claude step set <step> <ID> [<ID>...]`.
+
+## Sub-groups: sets inside a step
+
+A step is the main group; inside it, **objects of one kind that belong together form a
+sub-group** (a node's first group). Grouping is by what binds them, not only by
+analysis: the 5 cohort genotypes that all feed the GWAS pipeline, the 4 external GWAS
+sumstats, the 15 eQTL sets, the per-cohort Manhattan plots, the per-cohort pruned SNP
+lists, a pipeline's config files. The dashboard draws each as an inner halo in the step
+oval ("Sub-groups" selector: sets / same node type / off) and the destination copies
+land in a sub-folder per sub-group.
+
+- **Every import:** give each set of 2+ new objects of one kind a group in the plan
+  (`"groups": ["Manhattan plots (per cohort)"]`); `plan check` warns about a set left
+  ungrouped. Singletons need no group.
+- **After any import or for an existing project:** `sciweave group --suggest` proposes
+  sub-groups for ungrouped objects: first from the analysis history's `--group` labels
+  (inputs received together), then *sets*: same step, same type and file kind, tied the
+  same way to one process (all feed PL1 / PL1 produces all). Review the names, rename
+  where the shared label prefix is not the real bond, then apply
+  (`sciweave group "<name>" <IDs>`, or `--suggest --apply` when every name is right).
+- Name the bond, plural and specific: `Hispanic cohorts`, `LD-pruned SNP sets (per
+  cohort)`, `gwassnakemake configs`; not `misc`, `files`, `results`.
+- Keep a set homogeneous: a summary folder of all cohorts (one PCA folder) is not the
+  same kind as the 5 per-cohort files next to it; give each its own sub-group or none.
+- Moving an object to another sub-group moves its organized copy too (same drive: a rename).
 
 ## Updates: always with a reason, and replace vs branch
 

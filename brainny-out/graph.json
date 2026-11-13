@@ -199,6 +199,367 @@
       "novelty": null,
       "recurrence": 1,
       "last_touched": "2026-10-01T23:41:28+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "A pipeline's own output may not be what the next analysis read: hash-match the downstream tool's actual inputs before recording provenance",
+      "summary": "gwassnakemake's per-cohort sumstats (PLINK columns) were not what the meta-analysis consumed; post-hoc utility scripts reformatted them (added EAF, catalog columns) and lifted one cohort GRCh38->GRCh37. Only a SHA-256 match against mrmegask/input revealed which files were really used.",
+      "detail": "Before recording 'pipeline produces result used by step N', open step N's config, find the exact input paths, and hash-compare them to the candidate files. Converter scripts in a utilities/ folder are part of the provenance chain even if they are kept out of the published pipeline repo.",
+      "domain": "provenance tracking/gwas pipelines",
+      "tags": [
+        "provenance",
+        "sciweave",
+        "gwas",
+        "meta-analysis",
+        "sha256"
+      ],
+      "trigger": "recording which pipeline outputs fed a later analysis, or backing up 'the results that were used'",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0006",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:12:14+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:12:14+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-02T22:12:14+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "SMB shares on Windows throw transient OSError [Errno 22] Invalid argument mid-read: retry and resume at the byte offset instead of failing a long copy",
+      "summary": "A 13 GB copy from a \\\\server share died 128 MiB into one file with Errno 22; the same file read fine seconds later. Fix: reopen source, seek to last written byte, truncate dest there, retry with backoff (2/4/8/16 s); keep already-verified files of an interrupted folder copy (same size+mtime) instead of restarting.",
+      "detail": null,
+      "domain": "python/windows file i/o/network shares",
+      "tags": [
+        "windows",
+        "smb",
+        "oserror",
+        "copy",
+        "retry",
+        "resume"
+      ],
+      "trigger": "writing long-running copy/hash code that reads from network shares, especially with parallel heavy reads",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": "for attempt in range(5):\n    try:\n        with open(src,'rb') as fi, open(tmp,'r+b' if pos else 'wb') as fo:\n            fi.seek(pos); fo.seek(pos); fo.truncate()\n            for chunk in iter(lambda: fi.read(8<<20), b''):\n                fo.write(chunk); h.update(chunk); pos += len(chunk)\n        break\n    except (FileNotFoundError, PermissionError): raise\n    except OSError:\n        time.sleep(2 * 2**attempt)",
+      "id": "idea_0007",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:12:14+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:12:14+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-02T22:12:14+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "Windows PowerShell 5.1 Get-Content -Raw | Set-Content -Encoding utf8 silently corrupts BOM-less UTF-8 source files",
+      "summary": "Reading a UTF-8 file without BOM in PS 5.1 decodes it as the ANSI codepage (cp1252), so every non-ASCII char (·, ↑, —) becomes mojibake; Set-Content -Encoding utf8 then writes a BOM and CRLF. The file still passes a JS syntax check, so the damage is easy to miss.",
+      "detail": "Never round-trip source files through Get-Content/Set-Content in PowerShell 5.1; edit with a proper editor tool or Python (open(..., encoding='utf-8', newline='\n')). Repair: strip BOM, CRLF->LF, then re-encode each char to cp1252 bytes (code points <256 that cp1252 leaves undefined map to the same byte) and decode as UTF-8; check the git diff shrinks back to the intended edits.",
+      "domain": "windows tooling/text encoding",
+      "tags": [
+        "powershell",
+        "utf-8",
+        "bom",
+        "encoding",
+        "mojibake",
+        "windows"
+      ],
+      "trigger": "doing a quick find/replace on a source file from PowerShell 5.1",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0008",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:20:47+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:20:47+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-02T22:20:47+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "Parallel copy jobs that pick 'unique' destination names from already-recorded copies silently overwrite each other",
+      "summary": "SciWeave named a copy <id>_<file> only if the plain name was already recorded for another object. Two parallel jobs for files with the same basename (5 runs' metal.simple.tsv.gz) both saw the name free, wrote the same path, and all reported 'ok' while only one file existed. Fix: derive uniqueness from every object that WILL land in the folder (deterministic), refuse a path recorded for another object at record time, and surface a 'conflict' state for shared paths.",
+      "detail": null,
+      "domain": "file backup/concurrency/provenance tools",
+      "tags": [
+        "race-condition",
+        "parallel-jobs",
+        "backup",
+        "naming",
+        "sciweave"
+      ],
+      "trigger": "designing any parallel copy/export where destination names are de-duplicated",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0009",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:48:00+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:48:00+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-02T22:48:00+00:00"
+    },
+    {
+      "kind": "technique",
+      "title": "Verify an article's printed statistics against the result files before recording provenance",
+      "summary": "Before recording which meta-analysis outputs an article used, read every Best-SNP P/OR from the final tables (all sheets), look each SNP up in every candidate result file (main runs, targeted reruns, refits), compare P on log10 within rounding and OR after aligning MR-MEGA's effect allele to METAL's, and list anything matched only by a rerun or not at all. Turned up which numbers came from reruns/refits and that the 9-cohort run survived only as one curated copy.",
+      "detail": null,
+      "domain": "gwas meta-analysis/reproducibility",
+      "tags": [
+        "metal",
+        "mr-mega",
+        "verification",
+        "provenance",
+        "article-tables"
+      ],
+      "trigger": null,
+      "origin": "collaborative",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0010",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:48:00+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-02T22:48:00+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-02T22:48:00+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "Two copies of the same GWAS sumstats can differ only in a swapped effect/other allele header: verify with known risk alleles and EAF, never by row values alone",
+      "summary": "ssimpsmake's Bentham and Julia files were byte-for-byte the same numbers as the meta-analysis inputs but with effect_allele/other_allele header labels swapped (an older copy). Known SLE risk alleles (STAT4 rs7574865-T, IRF5 rs10488631-C) showed which labelling makes beta point the right way; the EAF column, meanwhile, belonged to the other allele (Bentham rs7574865 EAF 0.77 = G). Consequences: FIZI-imputed Z sign-flipped for those cohorts, and MR-MEGA axes distorted (Bentham+Julia alone at PC0=0.44 vs FIN -0.13), since harmonisation never checked EAF against the panel.",
+      "detail": null,
+      "domain": "gwas summary statistics/meta-analysis",
+      "tags": [
+        "allele-alignment",
+        "eaf",
+        "mr-mega",
+        "fizi",
+        "harmonization",
+        "summary-statistics"
+      ],
+      "trigger": "the same external summary statistics are used by several pipelines, or MR-MEGA ancestry axes put same-ancestry cohorts far apart",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0011",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-02T23:19:20+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-02T23:19:20+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-02T23:19:20+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "`python -m <pkg>` subprocesses import a same-named folder in the caller's working directory instead of the installed package",
+      "summary": "SciWeave's detached copy jobs ran `python -m sciweave` with the caller's cwd; launched from a parent folder containing the 'sciweave' repo checkout, Python imported that folder as a namespace package and every job died (ImportError: cannot import name '__version__' ... unknown location). Fix: set cwd to a neutral/project directory in Popen.",
+      "detail": null,
+      "domain": "python packaging/subprocess",
+      "tags": [
+        "python",
+        "subprocess",
+        "namespace-package",
+        "cwd",
+        "import"
+      ],
+      "trigger": "spawning `python -m yourpackage` from code that may run in arbitrary directories",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0012",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-02T23:19:20+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-02T23:19:20+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-02T23:19:20+00:00"
+    },
+    {
+      "kind": "precaution",
+      "title": "Script-safe '</' escaping breaks JS regex literals like /</g",
+      "summary": "When inlining JS into HTML, escaping '</' as '</' (to avoid closing the script tag) turns a regex literal such as .replace(/</g, ...) into /</g, a syntax error that silently kills the whole page. Write it as /[<]/g.",
+      "detail": null,
+      "domain": "web",
+      "tags": [
+        "javascript",
+        "html",
+        "inline-script",
+        "regex"
+      ],
+      "trigger": "Inlining a JS file into an HTML page through a function that rewrites '</'",
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0013",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-19T18:13:33+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-19T18:13:33+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-19T18:13:33+00:00"
+    },
+    {
+      "kind": "technique",
+      "title": "Syntax-highlighted textarea: transparent textarea over a <pre> with identical metrics",
+      "summary": "Lightweight code editor without a library: a highlighted <pre> under a transparent-text textarea (caret-color visible), same font/padding/white-space pre-wrap; force overflow-y: scroll on BOTH layers so scrollbar width is equal and soft-wraps line up; sync scrollTop on scroll; line numbers via ::before on per-line divs in the padding gutter.",
+      "detail": null,
+      "domain": "web",
+      "tags": [
+        "editor",
+        "textarea",
+        "syntax-highlighting",
+        "es5"
+      ],
+      "trigger": null,
+      "origin": "ai",
+      "attachments": [],
+      "snippet": null,
+      "id": "idea_0014",
+      "state": "seed",
+      "provenance": [
+        {
+          "project": "sciweave",
+          "session": "7c9999e9",
+          "ts": "2026-10-19T18:13:33+00:00"
+        }
+      ],
+      "growth_log": [
+        {
+          "session": "7c9999e9",
+          "ts": "2026-10-19T18:13:33+00:00",
+          "event": "seeded",
+          "note": "first captured"
+        }
+      ],
+      "edges": [],
+      "embedding": [],
+      "novelty": null,
+      "recurrence": 1,
+      "last_touched": "2026-10-19T18:13:33+00:00"
     }
   ]
 }
